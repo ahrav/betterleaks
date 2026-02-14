@@ -12,6 +12,8 @@ require (
 	github.com/h2non/filetype v1.1.3
 	github.com/hashicorp/go-version v1.7.0
 	github.com/mholt/archives v0.1.2
+	github.com/pkoukk/tiktoken-go v0.1.8
+	github.com/pkoukk/tiktoken-go-loader v0.0.2
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.19.0
@@ -29,6 +31,7 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
+	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect

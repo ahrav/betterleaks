@@ -15,6 +15,9 @@ import (
 	"github.com/betterleaks/betterleaks/logging"
 	"github.com/betterleaks/betterleaks/report"
 	"github.com/betterleaks/betterleaks/sources"
+	"github.com/betterleaks/betterleaks/words"
+	"github.com/pkoukk/tiktoken-go"
+	tiktoken_loader "github.com/pkoukk/tiktoken-go-loader"
 
 	ahocorasick "github.com/BobuSumisu/aho-corasick"
 	"github.com/fatih/semgroup"
@@ -165,6 +168,8 @@ type Detector struct {
 	Reporter   report.Reporter
 
 	TotalBytes atomic.Uint64
+
+	tokenizer *tiktoken.Tiktoken
 }
 
 // Fragment is an alias for sources.Fragment for backwards compatibility
@@ -180,6 +185,13 @@ func NewDetector(cfg config.Config) *Detector {
 // NewDetectorContext is the same as NewDetector but supports passing in a
 // context to use for timeouts
 func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
+	// grab offline tiktoken encoder
+	tiktoken.SetBpeLoader(tiktoken_loader.NewOfflineLoader())
+	tke, err := tiktoken.GetEncoding("cl100k_base")
+	if err != nil {
+		logging.Warn().Err(err).Msgf("Could not pull down cl100k_base tiktokenizer")
+	}
+
 	return &Detector{
 		commitMap:      make(map[string]bool),
 		gitleaksIgnore: make(map[string]struct{}),
@@ -189,6 +201,7 @@ func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
 		Config:         cfg,
 		prefilter:      *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
 		Sema:           semgroup.NewGroup(ctx, 40),
+		tokenizer:      tke,
 	}
 }
 
@@ -637,6 +650,12 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 			event.Msg("skipping finding: rule allowlist")
 			continue
 		}
+
+		if r.SmartFilter {
+			if d.failsSmartFilter(finding.Secret) {
+				continue
+			}
+		}
 		findings = append(findings, finding)
 	}
 
@@ -647,6 +666,32 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 
 	// Process required rules and create findings with auxiliary findings
 	return d.processRequiredRules(fragment, currentRaw, r, encodedSegments, findings, logger)
+}
+
+func (d *Detector) failsSmartFilter(secret string) bool {
+	// For short secrets (< 20 chars) that contain newlines, strip the newlines
+	// before analysis so that strings like "123\n\nTest" are evaluated as "123Test"
+	// allowing word detection to work.
+	analyzed := secret
+	if len(analyzed) < 20 && strings.ContainsAny(analyzed, "\n\r") {
+		analyzed = strings.NewReplacer("\n", "", "\r", "").Replace(analyzed)
+	}
+
+	tokens := d.tokenizer.Encode(analyzed, nil, nil)
+
+	matches := words.HasMatchInList(analyzed, 5)
+	if len(matches) > 0 {
+		return true
+	}
+	threshold := 2.5
+	if len(analyzed) < 12 {
+		threshold = 2.1
+		matches := words.HasMatchInList(analyzed, 3)
+		if len(matches) == 0 {
+			threshold = 2.5
+		}
+	}
+	return float64(len(analyzed))/float64(len(tokens)) >= threshold
 }
 
 // processRequiredRules handles the logic for multi-part rules with auxiliary findings

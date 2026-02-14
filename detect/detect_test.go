@@ -2771,3 +2771,110 @@ func TestWindowsFileSeparator_RuleAllowlistPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestFailsSmartFilter(t *testing.T) {
+	d, err := NewDetectorDefaultConfig()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		secret string
+		want   bool
+	}{
+		{
+			name:   "high entropy random secret should pass",
+			secret: "aK9#mP2$xL5nQ8wR",
+			want:   false,
+		},
+		{
+			name:   "contains english words should fail",
+			secret: "mysecretpassword",
+			want:   true,
+		},
+		{
+			name:   "repetitive string high ratio should fail",
+			secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			want:   true,
+		},
+		{
+			name:   "base64-like random token should pass",
+			secret: "dGhpcyBpcyBhIHRlc3Q",
+			want:   false,
+		},
+		{
+			name:   "hex-like secret should pass",
+			secret: "4a3f8b2c1d9e7f6a5b0c",
+			want:   false,
+		},
+		{
+			name:   "common placeholder should fail",
+			secret: "example_password_here",
+			want:   true,
+		},
+		{
+			name:   "UUID-like secret should pass",
+			secret: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			want:   false,
+		},
+		{
+			name:   "yyxcxywm",
+			secret: "yyxcxywm",
+			want:   false,
+		},
+		{
+			name:   "zwmpfovnu",
+			secret: "zwmpfovnu",
+			want:   false,
+		},
+		{
+			name:   "short random string should pass",
+			secret: "xK9mP2nQ",
+			want:   false,
+		},
+		// Short secrets with newlines: newlines are stripped before analysis.
+		{
+			name:   "short secret with newlines should fail",
+			secret: "123\n\nTest",
+			want:   true,
+		},
+		{
+			name:   "short secret with multiple newline-separated words should fail",
+			secret: "123\n\ncom\nnet",
+			want:   true,
+		},
+		// Very short secrets (< 12 chars): stricter token efficiency threshold.
+		{
+			name:   "short common password should fail",
+			secret: "letmein123",
+			want:   true,
+		},
+		{
+			name:   "short camelCase identifier should fail",
+			secret: "idxInOld",
+			want:   true,
+		},
+		{
+			name:   "short foreign word should fail",
+			secret: "Bevestig",
+			want:   true,
+		},
+		{
+			name:   "short constant OPT_NOKEYS should fail",
+			secret: "OPT_NOKEYS",
+			want:   true,
+		},
+		{
+			name:   "short constant OPT_NOCERTS should fail",
+			secret: "OPT_NOCERTS",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := d.failsSmartFilter(tt.secret)
+			assert.Equal(t, tt.want, got,
+				"failsSmartFilter(%q) = %v, want %v", tt.secret, got, tt.want)
+		})
+	}
+}

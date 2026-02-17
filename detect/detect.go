@@ -651,8 +651,8 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 			continue
 		}
 
-		if r.SmartFilter {
-			if d.failsSmartFilter(finding.Secret) {
+		if r.TokenEfficiency {
+			if d.failsTokenEfficiencyFilter(finding.Secret) {
 				continue
 			}
 		}
@@ -668,7 +668,7 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 	return d.processRequiredRules(fragment, currentRaw, r, encodedSegments, findings, logger)
 }
 
-func (d *Detector) failsSmartFilter(secret string) bool {
+func (d *Detector) failsTokenEfficiencyFilter(secret string) bool {
 	// For short secrets (< 20 chars) that contain newlines, strip the newlines
 	// before analysis so that strings like "123\n\nTest" are evaluated as "123Test"
 	// allowing word detection to work.

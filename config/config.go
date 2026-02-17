@@ -49,8 +49,8 @@ type ViperConfig struct {
 
 		Allowlists  []*viperRuleAllowlist
 		Required    []*viperRequired
-		SkipReport  bool
-		SmartFilter bool
+		SkipReport      bool
+		TokenEfficiency bool
 	}
 	// Deprecated: this is a shim for backwards-compatibility.
 	// TODO: Remove this in 9.x.
@@ -155,7 +155,7 @@ func (vc *ViperConfig) Translate() (Config, error) {
 			Keywords:    vr.Keywords,
 			Tags:        vr.Tags,
 			SkipReport:  vr.SkipReport,
-			SmartFilter: vr.SmartFilter,
+			TokenEfficiency: vr.TokenEfficiency,
 		}
 
 		// Parse the rule allowlists, including the older format for backwards compatibility.

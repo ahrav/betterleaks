@@ -210,6 +210,15 @@ secretGroup = 3
 # Float representing the minimum shannon entropy a regex group must have to be considered a secret.
 entropy = 3.5
 
+# Boolean that enables the Token Efficiency filter for this rule. When enabled, candidate secrets
+# are evaluated using BPE tokenization (cl100k_base) to measure how "rare" or non-natural-language
+# a string is. Common words and phrases tokenize into fewer, longer tokens (high token efficiency),
+# while secrets and random strings break into many short tokens (low token efficiency). Strings that
+# look like natural language are filtered out as false positives. This is an alternative to entropy
+# that is better at distinguishing true secrets from everyday text.
+# (introduced in v8.x.x)
+tokenEfficiency = true
+
 # Golang regular expression used to match paths. This can be used as a standalone rule or it can be used
 # in conjunction with a valid `regex` entry.
 path = '''a-file-path-regex'''

@@ -2772,7 +2772,7 @@ func TestWindowsFileSeparator_RuleAllowlistPaths(t *testing.T) {
 	}
 }
 
-func TestFailsSmartFilter(t *testing.T) {
+func TestFailsTokenEfficiencyFilter(t *testing.T) {
 	d, err := NewDetectorDefaultConfig()
 	require.NoError(t, err)
 
@@ -2872,9 +2872,9 @@ func TestFailsSmartFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := d.failsSmartFilter(tt.secret)
+			got := d.failsTokenEfficiencyFilter(tt.secret)
 			assert.Equal(t, tt.want, got,
-				"failsSmartFilter(%q) = %v, want %v", tt.secret, got, tt.want)
+				"failsTokenEfficiencyFilter(%q) = %v, want %v", tt.secret, got, tt.want)
 		})
 	}
 }

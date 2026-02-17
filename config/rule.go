@@ -53,7 +53,11 @@ type Rule struct {
 
 	SkipReport bool
 
-	SmartFilter bool
+	// TokenEfficiency enables the Token Efficiency filter for this rule.
+	// When enabled, candidate secrets are evaluated using BPE tokenization
+	// to measure how "rare" or non-natural-language a string is. Strings that
+	// tokenize efficiently (i.e., common words/phrases) are filtered out.
+	TokenEfficiency bool
 }
 
 type Required struct {

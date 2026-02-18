@@ -2782,6 +2782,11 @@ func TestFailsTokenEfficiencyFilter(t *testing.T) {
 		want   bool
 	}{
 		{
+			name:   "richards example",
+			secret: "AIzaFAKE_KEY_FOR_TESTING_ONLY_fake12345",
+			want:   true,
+		},
+		{
 			name:   "high entropy random secret should pass",
 			secret: "aK9#mP2$xL5nQ8wR",
 			want:   false,

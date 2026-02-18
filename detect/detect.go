@@ -30,6 +30,8 @@ import (
 // betterleaks:allow is checked first (preferred), followed by gitleaks:allow for backwards compatibility.
 var allowSignatures = []string{"betterleaks:allow", "gitleaks:allow"}
 
+var newlineReplacer = strings.NewReplacer("\n", "", "\r", "")
+
 const (
 	// SlowWarningThreshold is the amount of time to wait before logging that a file is slow.
 	// This is useful for identifying problematic files and tuning the allowlist.
@@ -674,7 +676,7 @@ func (d *Detector) failsTokenEfficiencyFilter(secret string) bool {
 	// allowing word detection to work.
 	analyzed := secret
 	if len(analyzed) < 20 && strings.ContainsAny(analyzed, "\n\r") {
-		analyzed = strings.NewReplacer("\n", "", "\r", "").Replace(analyzed)
+		analyzed = newlineReplacer.Replace(analyzed)
 	}
 
 	tokens := d.tokenizer.Encode(analyzed, nil, nil)

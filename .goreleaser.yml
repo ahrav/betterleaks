@@ -1,31 +1,83 @@
+version: 2
+
 project_name: betterleaks
 
 builds:
-  - main: main.go
+  - id: betterleaks
+    main: main.go
     binary: betterleaks
+    env:
+      - CGO_ENABLED=0
     goos:
       - darwin
       - linux
       - windows
     goarch:
       - amd64
-      - "386"
-      - arm
       - arm64
-    goarm:
-      - "6"
-      - "7"
-    tags:
-      - gore2regex
     ldflags:
       - -s -w -X=github.com/betterleaks/betterleaks/version.Version={{.Version}}
+
 archives:
-  - builds: [betterleaks]
+  - ids: [betterleaks]
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        format: zip
-    replacements:
-      amd64: x64
-      386: x32
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x64
+      {{- else if eq .Arch "386" }}x32
+      {{- else }}{{ .Arch }}{{ end }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+dockers_v2:
+  - images:
+      - "ghcr.io/betterleaks/betterleaks"
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .IsNightly }}latest{{ end }}"
+    dockerfile: goreleaser.Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.url": "https://github.com/betterleaks/betterleaks"
+      "org.opencontainers.image.source": "{{ .GitURL }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+
+homebrew_casks:
+  - name: betterleaks
+    binaries:
+      - betterleaks
+    homepage: "https://github.com/betterleaks/betterleaks"
+    description: "Secrets scanner built on the legacy of gitleaks"
+    skip_upload: auto
+    repository:
+      owner: betterleaks
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/betterleaks"]
+          end
+
 release:
-  prerelease: true
+  prerelease: auto

@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	//go:embed gitleaks.toml
+	//go:embed betterleaks.toml
 	DefaultConfig string
 
 	// use to keep track of how many configs we can extend
@@ -47,8 +47,8 @@ type ViperConfig struct {
 		// TODO: Remove this in 9.x.
 		AllowList *viperRuleAllowlist
 
-		Allowlists  []*viperRuleAllowlist
-		Required    []*viperRequired
+		Allowlists      []*viperRuleAllowlist
+		Required        []*viperRequired
 		SkipReport      bool
 		TokenEfficiency bool
 	}
@@ -58,8 +58,8 @@ type ViperConfig struct {
 
 	Allowlists []*viperGlobalAllowlist
 
-	MinVersion             string
-	BetterleaksMinVersion  string
+	MinVersion            string
+	BetterleaksMinVersion string
 
 	configPath string
 }
@@ -100,10 +100,10 @@ type Config struct {
 	// NoKeywordRules contains rule IDs that have no keywords and must always be checked.
 	NoKeywordRules []string
 	// used to keep sarif results consistent
-	OrderedRules []string
-	Allowlists             []*Allowlist
-	MinVersion             string
-	BetterleaksMinVersion  string
+	OrderedRules          []string
+	Allowlists            []*Allowlist
+	MinVersion            string
+	BetterleaksMinVersion string
 }
 
 // Extend is a struct that allows users to define how they want their
@@ -148,15 +148,15 @@ func (vc *ViperConfig) Translate() (Config, error) {
 			vr.Tags = []string{}
 		}
 		cr := Rule{
-			RuleID:      vr.ID,
-			Description: vr.Description,
-			Regex:       regexPat,
-			SecretGroup: vr.SecretGroup,
-			Entropy:     vr.Entropy,
-			Path:        pathPat,
-			Keywords:    vr.Keywords,
-			Tags:        vr.Tags,
-			SkipReport:  vr.SkipReport,
+			RuleID:          vr.ID,
+			Description:     vr.Description,
+			Regex:           regexPat,
+			SecretGroup:     vr.SecretGroup,
+			Entropy:         vr.Entropy,
+			Path:            pathPat,
+			Keywords:        vr.Keywords,
+			Tags:            vr.Tags,
+			SkipReport:      vr.SkipReport,
 			TokenEfficiency: vr.TokenEfficiency,
 		}
 
@@ -205,12 +205,12 @@ func (vc *ViperConfig) Translate() (Config, error) {
 
 	// Assemble the config.
 	c := Config{
-		Title:        vc.Title,
-		Description:  vc.Description,
-		Extend:       vc.Extend,
-		Rules:        rulesMap,
-		Keywords:     keywords,
-		OrderedRules: orderedRules,
+		Title:                 vc.Title,
+		Description:           vc.Description,
+		Extend:                vc.Extend,
+		Rules:                 rulesMap,
+		Keywords:              keywords,
+		OrderedRules:          orderedRules,
 		MinVersion:            vc.MinVersion,
 		BetterleaksMinVersion: vc.BetterleaksMinVersion,
 	}

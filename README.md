@@ -34,7 +34,7 @@ A couple things:
 - Regex engine switching w/ (`--regexp-engine=re2`)
 
 ## What's Coming?
-Great question. Check out what we're cookin in the v2 branch.
+Great question. Check out what we're cookin in the [v2 branch](https://github.com/betterleaks/betterleaks/tree/v2-dev).
 
 ## Installation
 TODO

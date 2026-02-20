@@ -27,11 +27,11 @@ Wait wtf this isn't Gitleaks. You're right, it's not but it's built by the same 
 
 ## What's New?
 A couple things:
-- Parallelized Git Scanning (`--git-workers=`)
+- Parallelized Git Scanning (`--git-workers=8`)
 - Optimized Recursive Decoding (for catching those nasty SHA1-HULUD variants)
-- Token Efficiency Filter (a better entropy)
+- [Token Efficiency Filter](https://lookingatcomputer.substack.com/p/rare-not-random)
 - Misc optimizations
-- Regex engine switching w/ (`--regexp-engine=re2`)
+- Regex engine switching w/ (`--regexp-engine=stdlib/re2`)
 
 ### Benchmarks
 

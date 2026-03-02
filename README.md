@@ -36,7 +36,7 @@ A couple things:
 - [Token Efficiency Filter](https://lookingatcomputer.substack.com/p/rare-not-random)
 - Secret Validation — automatically check if a detected secret is live by firing an HTTP request
 - Misc optimizations
-- Regex engine switching w/ (`--regexp-engine=stdlib/re2`)
+- Regex engine switching w/ (`--regex-engine=stdlib/re2` or `BETTERLEAKS_REGEX_ENGINE=stdlib`)
 - MORE RULES! Ahhh finally!
 
 ### Benchmarks
@@ -51,7 +51,8 @@ Great question. Check out what we're cookin in the [v2 branch](https://github.co
 ## Installation
 ```
 # Package managers
-brew install betterleaks/tap/betterleaks
+brew install betterleaks
+brew install betterleaks/tap/betterleaks 
 
 # Containers
 docker pull ghcr.io/betterleaks/betterleaks:latest

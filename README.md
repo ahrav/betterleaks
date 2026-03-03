@@ -456,42 +456,72 @@ fragment = section of data gitleaks is looking at
 
 
 #### Secrets Validation
-⚠️ **Secrets Validation is an experimental feature and likely to change. Feel free to use play with it and tweak your configs but don't be sad when we change it... because we are exploring _new_ and _cool_ ideas.** To enable the validation feature you must set the experimental flag w/ `--experiments=validation`
+⚠️ **Secrets Validation is an experimental feature and likely to change. Feel free to play with it and tweak your configs but don't be sad when we change it... because we are exploring _new_ and _cool_ ideas.** To enable validation you must pass `--experiments=validation`.
 ⚠️
 
+Betterleaks can automatically check whether a detected secret is live by making an HTTP request defined in a `validate` field on the rule. Validation runs asynchronously during the scan with a configurable worker pool (default: 10). Responses are cached in-memory per scan so duplicate requests (e.g., the same API key found in multiple files) only hit the network once.
 
-Betterleaks can automatically check whether a detected secret is live by firing an HTTP request defined in a `[rules.validate]` block. Validation runs asynchronously during the scan with a pool of 10 workers.
+##### CEL Expressions
 
-Each `[rules.validate]` block describes an HTTP request and an ordered list of **match clauses**. Clauses are evaluated top-to-bottom; the first clause whose conditions all pass determines the finding's status. This first-match-wins design lets a single rule distinguish `valid`, `revoked`, `invalid`, etc. secrets from the same API endpoint. If no clause matches, the result defaults to `unknown`.
+Each rule's `validate` field is a [CEL (Common Expression Language)](https://cel.dev) expression. CEL is a simple, safe, and fast expression language. The expression receives the captured `secret` and any named regex `captures`, fires one or more HTTP requests, and returns a result indicating the secret's status.
 
-Responses are cached in-memory per scan so duplicate requests (e.g., the same API key appearing in multiple files) only hit the network once.
+**Variables available in every expression:**
 
-##### Template Variables
-
-Templates use [Liquid](https://shopify.github.io/liquid/) syntax and are supported in `url`, `body`, and `headers`. The following variables are available:
-
-| Variable | Source | Example |
+| Variable | Type | Description |
 |---|---|---|
-| `{{ secret }}` | The captured secret (always available) | `ghp_abc123...` |
-| `{{ capture_name }}` | Named regex capture group `(?P<capture_name>...)` | `AKIAIOSFODNN7` |
-| `{{ other-rule.capture }}` | Capture group from a required rule (composite rules) | `wJalrXUtnFEMI...` |
+| `secret` | `string` | The captured secret value |
+| `captures` | `map<string, string>` | Named capture groups from the rule's regex (`(?P<name>...)`) |
 
-**Liquid filters** let you transform values inline:
+**HTTP functions:**
 
-```toml
-# Base64-encode for Basic auth
-headers = { Authorization = "Basic {{ secret | prepend: 'api:' | b64enc }}" }
+| Function | Signature | Description |
+|---|---|---|
+| `http.get` | `(url string, headers map<string,string>) → response` | Fire a GET request |
+| `http.post` | `(url string, headers map<string,string>, body string) → response` | Fire a POST request |
 
-# URL-encode a parameter
-url = "https://api.example.com/check?key={{ secret | url_encode }}"
+**Response object fields** (the map returned by `http.get` / `http.post`):
 
-# HMAC-sign a payload
-body = "{{ payload | hmac_sha256: secret }}"
+| Field | Type | Description |
+|---|---|---|
+| `r.status` | `int` | HTTP status code |
+| `r.body` | `string` | Raw response body |
+| `r.json` | `dyn` | Parsed JSON body (map or list); empty map `{}` if not valid JSON |
+| `r.headers` | `map<string, string>` | Response headers (all keys lowercased) |
+
+**Helper functions:**
+
+| Function | Description |
+|---|---|
+| `safeGet(map, key, default)` | Returns `map[key]` as a string, or `default` if missing or not a string |
+| `unknown(response)` | Returns `{"result": "unknown", "reason": "HTTP <status>"}` — useful as a fallback |
+| `cel.bind(name, value, expr)` | Binds `value` to `name` within `expr` — avoids repeating sub-expressions |
+
+**String / encoding functions** (from CEL extensions):
+
+| Function | Description |
+|---|---|
+| `s.substring(start)` | Substring from index |
+| `s.lastIndexOf(sub)` | Last index of substring, or `-1` |
+| `base64.encode(bytes(s))` | Base64-encode a string — use for `Authorization: Basic` headers |
+
+##### Result Format
+
+An expression can return:
+- **`true`** → `valid`
+- **`false`** → `invalid`
+- **A map** with a `"result"` key set to one of `valid`, `invalid`, `revoked`, `unknown`, or `error`. All other keys in the map are attached as metadata on the finding.
+
+```cel
+# Boolean shorthand
+r.status == 200
+
+# Map with status and metadata
+{
+  "result": "valid",
+  "reason": "authenticated",
+  "username": safeGet(r.json, "login", "")
+}
 ```
-
-Available filters: `b64enc`, `b64dec`, `url_encode`, `sha256`, `hmac_sha1`, `hmac_sha256`, `unix_timestamp`, `iso_timestamp`, `json_escape`, `uuid`, `prefix`, `suffix` (plus all [standard Liquid filters](https://shopify.github.io/liquid/filters/)).
-
-For composite rules with multiple required parts, all combinations are tested (cartesian product), and a single `valid` match is enough.
 
 ##### Simple Example — GitHub PAT
 
@@ -500,119 +530,152 @@ For composite rules with multiple required parts, all combinations are tested (c
 id = "github-pat"
 regex = '''ghp_[0-9a-zA-Z]{36}'''
 keywords = ["ghp_"]
-
-    [rules.validate]
-    type = "http"
-    method = "GET"
-    url = "https://api.github.com/user"
-    headers = { Authorization = "token {{ secret }}", Accept = "application/vnd.github+json" }
-    extract = { username = "json:login", name = "json:name", scopes = "header:X-OAuth-Scopes" }
-
-    match = [
-        { status = 200, json = { login = "!empty", id = "!empty" }, result = "valid" },
-        { status = 401, result = "invalid" },
-        { status = 403, result = "invalid" },
-    ]
+validate = '''
+  cel.bind(r,
+    http.get("https://api.github.com/user", {
+      "Accept": "application/vnd.github+json",
+      "Authorization": "token " + secret
+    }),
+    r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+      "result": "valid",
+      "username": safeGet(r.json, "login", ""),
+      "name": safeGet(r.json, "name", ""),
+      "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    } : r.status in [401, 403] ? {
+      "result": "invalid",
+      "reason": "Unauthorized"
+    } : unknown(r)
+  )
+'''
 ```
 
-##### Complex Example — Slack Bot Token
+##### Complex Example — Mailchimp (dynamic datacenter + Basic auth)
 
-All responses return 200; differentiated by JSON body content:
+Mailchimp API keys embed the datacenter in the key itself (`key-us18`), so the validation URL must be constructed dynamically:
 
 ```toml
 [[rules]]
-id = "slack-bot-token"
-regex = '''(xoxb-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24})'''
-keywords = ["xoxb-"]
-
-    [rules.validate]
-    method = "POST"
-    url = "https://slack.com/api/auth.test"
-    headers = { Authorization = "Bearer {{ secret }}", Content-Type = "application/x-www-form-urlencoded" }
-    extract = { url = "json:url", user = "json:user", team = "json:team" }
-
-    match = [
-        { status = 200, json = { ok = true }, result = "valid" },
-        { status = 200, json = { ok = false, error = ["account_inactive", "token_revoked"] }, result = "revoked", extract = { error = "json:error" } },
-        { status = 200, json = { ok = false }, result = "invalid" },
-        { status = 400, result = "invalid" },
-    ]
+id = "mailchimp-api-key"
+regex = '''(?i)[0-9a-f]{32}-us[0-9]{1,2}'''
+keywords = ["mailchimp"]
+validate = '''
+  cel.bind(dc, secret.substring(secret.lastIndexOf("-") + 1),
+    cel.bind(r,
+      http.get("https://" + dc + ".api.mailchimp.com/3.0/ping", {
+        "Accept": "application/json",
+        "Authorization": "Basic " + base64.encode(bytes("x:" + secret))
+      }),
+      r.status == 200 ? {
+        "result": "valid"
+      } : r.status in [401, 403] ? {
+        "result": "invalid",
+        "reason": "Unauthorized"
+      } : unknown(r)
+    )
+  )
+'''
 ```
 
+##### Composite Rules (multi-part secrets)
 
-##### Match Clauses
+Some secrets require two separate values to validate — for example, a service that needs both an account ID and an auth token. Betterleaks supports this with `[[rules.required]]`, which links rules together. When the primary rule fires and the required rule's pattern is also found nearby, both secrets are bundled into a single finding.
 
-If no clause matches, the result defaults to `UNKNOWN`. You do not need to add an explicit catch-all `{ result = "unknown" }` clause.
+The CEL expression on the **primary rule** receives:
 
-**Match clause fields:**
+| `captures` key | Value |
+|---|---|
+| `captures["required-rule-id"]` | The matched secret from the required rule |
+| `captures["required-rule-id:capture-name"]` | A named capture group from the required rule's regex |
 
-| Field | Type | Description |
-|---|---|---|
-| `status` | int or list of ints | Response status code must be one of these values. `status = 200` and `status = [200, 201]` are both valid. |
-| `words` | list of strings | Body must contain at least one of these strings (any match). Case-insensitive. |
-| `words_all` | bool | If `true`, body must contain **all** `words` |
-| `negative_words` | list of strings | Body must **not** contain any of these strings. Case-insensitive. |
-| `json` | inline table | GJSON path assertions that must all be satisfied. Keys are [GJSON paths](https://github.com/tidwall/gjson/blob/master/SYNTAX.md), values can be: a scalar for exact match, `"!empty"` for existence check, or a list for one-of matching (e.g. `error = ["revoked", "inactive"]`). |
-| `headers` | inline table | Response header assertions. Keys are header names (case-insensitive), values are expected substrings (case-insensitive). |
-| `result` | string | **Required.** One of: `valid`, `invalid`, `revoked`, `unknown`, `error` |
-| `extract` | inline table | Per-clause extractor override. See Extractors below. |
+If multiple instances of a required rule are found, all combinations are tested (cartesian product) and the best result wins (`valid` > `invalid` > `revoked` > `unknown` > `error`). A `valid` result short-circuits the remaining combinations.
 
-##### Extractors
-
-Extractors pull data from the HTTP response into finding metadata. They are defined as a map of output names to source-prefixed expressions:
-
-| Prefix | Source | Example |
-|---|---|---|
-| `json:` | GJSON path on response body | `json:user.login`, `json:repos.#.name` |
-| `header:` | Response header value | `header:X-OAuth-Scopes` |
-
-Extractors can be defined at the `[rules.validate]` level (default for all clauses) or on individual match clauses (overrides the default). Array results from JSON paths are joined with commas.
+**Example — Twilio (Account SID + Auth Token):**
 
 ```toml
-[rules.validate]
-# Default extractors — used by any clause that doesn't define its own
-extract = { username = "json:login", scopes = "header:X-OAuth-Scopes" }
+# Rule 1: match the Account SID only (no validate — it's only meaningful combined)
+[[rules]]
+id = "twilio-account-sid"
+regex = '''(AC[a-f0-9]{32})'''
+keywords = ["twilio", "AC"]
+skipReport = true
 
-match = [
-    { status = 200, result = "valid" },
-    # This clause overrides the default extract:
-    { status = 200, json = { ok = false }, result = "invalid", extract = { error = "json:error" } },
-]
+# Rule 2: match the auth token and require Rule 1 to be nearby
+[[rules]]
+id = "twilio-auth-token"
+regex = '''(?i)twilio[^"'\n]{0,20}?([a-f0-9]{32})'''
+keywords = ["twilio"]
+secretGroup = 1
+validate = '''
+  cel.bind(sid, captures["twilio-account-sid"],
+    cel.bind(r,
+      http.get("https://api.twilio.com/2010-04-01/Accounts/" + sid + ".json", {
+        "Authorization": "Basic " + base64.encode(bytes(sid + ":" + secret))
+      }),
+      r.status == 200 ? {
+        "result": "valid",
+        "account_sid": sid,
+        "friendly_name": safeGet(r.json, "friendly_name", "")
+      } : r.status == 401 ? {
+        "result": "invalid",
+        "reason": "Unauthorized"
+      } : unknown(r)
+    )
+  )
+'''
+
+[[rules.required]]
+id = "twilio-account-sid"
+withinLines = 5
 ```
+
+The `[[rules.required]]` section controls proximity matching:
+
+| Field | Description |
+|---|---|
+| `id` | Rule ID that must also fire nearby |
+| `withinLines` | Required rule must match within ±N lines of the primary |
+| `withinColumns` | Required rule must match within ±N columns of the primary |
+
+If neither `withinLines` nor `withinColumns` is set, the required rule just needs to appear anywhere in the same scanned fragment.
 
 ##### Validation Statuses
 
 | Status | Meaning |
 |---|---|
-| `VALID` | Secret is live and active |
-| `INVALID` | Secret is not recognised — stale or never valid |
-| `REVOKED` | Secret was once valid but has been revoked |
-| `UNKNOWN` | Validation ran but could not determine status |
-| `ERROR` | Network/request error — the request itself failed |
-| *(empty)* | Validation was not attempted (no `[rules.validate]` block) |
+| `valid` | Secret is live and active |
+| `invalid` | Secret is not recognised — stale or never valid |
+| `revoked` | Secret was once valid but has been explicitly revoked |
+| `unknown` | Validation ran but could not determine status (unexpected HTTP response) |
+| `error` | Network/request error — the HTTP call itself failed |
+| *(empty)* | Validation was not attempted (rule has no `validate` field) |
 
 ##### CLI Flags
 
 | Flag | Default | Description |
 |---|---|---|
+| `--experiments=validation` | — | **Required.** Opt in to the validation feature |
 | `--validation` | `true` | Master toggle — set `--validation=false` to skip all validation |
-| `--validation-status` | *(all)* | Comma-separated list of statuses to include in output: `valid`, `invalid`, `revoked`, `error`, `unknown`, `none`. Use `none` to include findings from rules without a validation block. |
-| `--validation-extract-empty` | `false` | Include empty/nil extracted values in output |
+| `--validation-status` | *(all)* | Comma-separated list of statuses to include in output: `valid`, `invalid`, `revoked`, `error`, `unknown`, `none`. Use `none` to include findings from rules without a `validate` field. |
 | `--validation-timeout` | `10s` | Per-request HTTP timeout |
-| `--validation-full-response` | `false` | Include full HTTP response body in the finding output |
+| `--validation-workers` | `10` | Number of concurrent validation workers |
+| `--validation-debug` | `false` | Attach raw HTTP request/response to finding metadata |
+| `--validation-extract-empty` | `false` | Include empty/nil metadata values in output |
 
 ```bash
 # Only show valid findings (excludes non-validatable rules)
-betterleaks git --validation-status valid
+betterleaks git --experiments=validation --validation-status valid
 
 # Show valid findings + all non-validatable rules
-betterleaks git --validation-status valid,none
+betterleaks git --experiments=validation --validation-status valid,none
 
 # Show valid and revoked
-betterleaks dir --validation-status valid,revoked
+betterleaks dir --experiments=validation --validation-status valid,revoked
 
 # Disable validation entirely
 betterleaks git --validation=false
+
+# Debug: see the raw HTTP request and response in output
+betterleaks dir --experiments=validation --validation-debug
 ```
 
 #### betterleaks:allow / gitleaks:allow

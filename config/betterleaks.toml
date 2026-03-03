@@ -2547,10 +2547,6 @@ keywords = [
     "ghu_",
     "ghs_",
 ]
-[[rules.allowlists]]
-paths = [
-    '''(?:^|/)@octokit/auth-token/README\.md$''',
-]
 validate = '''
 cel.bind(r,
   http.get("https://api.github.com/user", {
@@ -2568,6 +2564,10 @@ cel.bind(r,
   } : unknown(r)
 )
 '''
+[[rules.allowlists]]
+paths = [
+    '''(?:^|/)@octokit/auth-token/README\.md$''',
+]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # github-fine-grained-pat
@@ -2632,10 +2632,6 @@ description = "Uncovered a GitHub Personal Access Token, potentially leading to 
 regex = '''ghp_[0-9a-zA-Z]{36}'''
 entropy = 3
 keywords = ["ghp_"]
-[[rules.allowlists]]
-paths = [
-    '''(?:^|/)@octokit/auth-token/README\.md$''',
-]
 validate = '''
 cel.bind(r,
   http.get("https://api.github.com/user", {
@@ -2653,6 +2649,10 @@ cel.bind(r,
   } : unknown(r)
 )
 '''
+[[rules.allowlists]]
+paths = [
+    '''(?:^|/)@octokit/auth-token/README\.md$''',
+]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # github-refresh-token

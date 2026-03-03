@@ -62,6 +62,8 @@ tags = [
 ]{{ end }}
 {{- if $rule.SkipReport }}
 skipReport = true{{ end }}
+{{- with $rule.ValidateCEL }}
+validate = {{ tomlCEL . }}{{ end }}
 {{- with $rule.Allowlists }}{{ range $i, $allowlist := . }}{{ if or $allowlist.Regexes $allowlist.Paths $allowlist.Commits $allowlist.StopWords }}{{println}}[[rules.allowlists]]
 {{- with .Description }}{{println}}description = "{{ . }}"{{ end }}
 {{- with .MatchCondition }}{{println}}condition = "{{ .String }}"{{ end }}
@@ -84,6 +86,4 @@ id = "{{ .RuleID }}"
 withinLines = {{ . }}{{ end }}
 {{- with .WithinColumns }}
 withinColumns = {{ . }}{{ end }}{{ end }}
-{{- with $rule.ValidateCEL }}
-validate = {{ tomlCEL . }}{{ end }}
 {{ end }}

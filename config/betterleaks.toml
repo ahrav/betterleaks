@@ -182,16 +182,21 @@ id = "anthropic-admin-api-key"
 description = "Detected an Anthropic Admin API Key, risking unauthorized access to administrative functions and sensitive AI model configurations."
 regex = '''\b(sk-ant-admin01-[a-zA-Z0-9_\-]{93}AA)(?:[\x60'"\s;]|\\[nr]|$)'''
 keywords = ["sk-ant-admin01"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.anthropic.com/v1/organizations/me"
-headers = { anthropic-version = "2023-06-01", x-api-key = '{{ secret }}' }
-extract = { organization = "json:name" }
-match = [
-    { status = 200, json = { id = "!empty", type = "organization" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.anthropic.com/v1/organizations/me", {
+    "x-api-key": secret,
+    "anthropic-version": "2023-06-01"
+  }),
+  r.status == 200 && safeGet(r.json, "id", "") != "" && safeGet(r.json, "type", "") == "organization" ? {
+    "result": "valid",
+    "organization": safeGet(r.json, "name", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # anthropic-api-key
@@ -201,15 +206,20 @@ id = "anthropic-api-key"
 description = "Identified an Anthropic API Key, which may compromise AI assistant integrations and expose sensitive data to unauthorized access."
 regex = '''\b(sk-ant-api03-[a-zA-Z0-9_\-]{93}AA)(?:[\x60'"\s;]|\\[nr]|$)'''
 keywords = ["sk-ant-api03"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.anthropic.com/v1/models"
-headers = { anthropic-version = "2023-06-01", x-api-key = '{{ secret }}' }
-match = [
-    { status = 200, words = ['"data"', '"type"', ], words_all = true, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.anthropic.com/v1/models", {
+    "x-api-key": secret,
+    "anthropic-version": "2023-06-01"
+  }),
+  r.status == 200 && r.body.contains('"data"') && r.body.contains('"type"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # artifactory-api-key
@@ -393,15 +403,19 @@ description = "Identified a Cerebras AI API Key, which may expose AI inference s
 regex = '''(?i)\b(csk-[a-z0-9]{48})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3
 keywords = ["csk-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.cerebras.ai/v1/models"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"object"', '"data"', ], words_all = true, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.cerebras.ai/v1/models", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"object"') && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # cisco-meraki-api-key
@@ -487,15 +501,19 @@ keywords = [
     "cohere",
     "co_api_key",
 ]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.cohere.com/v1/connectors"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"connectors"', '"total_count"', ], words_all = true, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.cohere.com/v1/connectors", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"connectors"') && r.body.contains('"total_count"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # coinbase-access-token
@@ -571,15 +589,20 @@ description = "Detected a Cursor Integrations API Key, which may expose AI-assis
 regex = '''(?i)[\w.-]{0,50}?(?:cursor)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}(key_[0-9a-f]{64})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3.5
 keywords = ["cursor"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.cursor.com/v0/me"
-headers = { Accept = "application/json", Authorization = 'Basic {{ secret | b64enc }}' }
-match = [
-    { status = 200, words = ['"userEmail"', ], result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.cursor.com/v0/me", {
+    "Accept": "application/json",
+    "Authorization": "Basic " + base64.encode(bytes(secret))
+  }),
+  r.status == 200 && r.body.contains('"userEmail"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # databricks-api-token
@@ -619,15 +642,20 @@ description = "Detected a DeepSeek API Key, which may expose AI model access and
 regex = '''(?i)[\w.-]{0,50}?(?:deepseek)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}(sk-[a-f0-9]{32})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3.5
 keywords = ["deepseek"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.deepseek.com/models"
-headers = { Accept = "application/json", Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"data"', ], result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.deepseek.com/models", {
+    "Authorization": "Bearer " + secret,
+    "Accept": "application/json"
+  }),
+  r.status == 200 && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # defined-networking-api-token
@@ -2523,16 +2551,23 @@ keywords = [
 paths = [
     '''(?:^|/)@octokit/auth-token/README\.md$''',
 ]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.github.com/user"
-headers = { Accept = "application/vnd.github+json", Authorization = 'token {{ secret }}' }
-extract = { name = "json:name", scopes = "header:X-OAuth-Scopes", username = "json:login" }
-match = [
-    { status = 200, json = { id = "!empty", login = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.github.com/user", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "token " + secret
+  }),
+  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+    "result": "valid",
+    "username": safeGet(r.json, "login", ""),
+    "name": safeGet(r.json, "name", ""),
+    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # github-fine-grained-pat
@@ -2543,16 +2578,23 @@ description = "Found a GitHub Fine-Grained Personal Access Token, risking unauth
 regex = '''github_pat_\w{82}'''
 entropy = 3
 keywords = ["github_pat_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.github.com/user"
-headers = { Accept = "application/vnd.github+json", Authorization = 'token {{ secret }}' }
-extract = { name = "json:name", scopes = "header:X-OAuth-Scopes", username = "json:login" }
-match = [
-    { status = 200, json = { id = "!empty", login = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.github.com/user", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "token " + secret
+  }),
+  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+    "result": "valid",
+    "username": safeGet(r.json, "login", ""),
+    "name": safeGet(r.json, "name", ""),
+    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # github-oauth
@@ -2563,16 +2605,23 @@ description = "Discovered a GitHub OAuth Access Token, posing a risk of compromi
 regex = '''gho_[0-9a-zA-Z]{36}'''
 entropy = 3
 keywords = ["gho_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.github.com/user"
-headers = { Accept = "application/vnd.github+json", Authorization = 'token {{ secret }}' }
-extract = { name = "json:name", scopes = "header:X-OAuth-Scopes", username = "json:login" }
-match = [
-    { status = 200, json = { id = "!empty", login = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.github.com/user", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "token " + secret
+  }),
+  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+    "result": "valid",
+    "username": safeGet(r.json, "login", ""),
+    "name": safeGet(r.json, "name", ""),
+    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # github-pat
@@ -2587,16 +2636,23 @@ keywords = ["ghp_"]
 paths = [
     '''(?:^|/)@octokit/auth-token/README\.md$''',
 ]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.github.com/user"
-headers = { Accept = "application/vnd.github+json", Authorization = 'token {{ secret }}' }
-extract = { name = "json:name", scopes = "header:X-OAuth-Scopes", username = "json:login" }
-match = [
-    { status = 200, json = { id = "!empty", login = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.github.com/user", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "token " + secret
+  }),
+  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+    "result": "valid",
+    "username": safeGet(r.json, "login", ""),
+    "name": safeGet(r.json, "name", ""),
+    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # github-refresh-token
@@ -2607,16 +2663,23 @@ description = "Detected a GitHub Refresh Token, which could allow prolonged unau
 regex = '''ghr_[0-9a-zA-Z]{36}'''
 entropy = 3
 keywords = ["ghr_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.github.com/user"
-headers = { Accept = "application/vnd.github+json", Authorization = 'token {{ secret }}' }
-extract = { name = "json:name", scopes = "header:X-OAuth-Scopes", username = "json:login" }
-match = [
-    { status = 200, json = { id = "!empty", login = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.github.com/user", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "token " + secret
+  }),
+  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+    "result": "valid",
+    "username": safeGet(r.json, "login", ""),
+    "name": safeGet(r.json, "name", ""),
+    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-cicd-job-token
@@ -2627,15 +2690,19 @@ description = "Identified a GitLab CI/CD Job Token, potential access to projects
 regex = '''glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}'''
 entropy = 3
 keywords = ["glcbt-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/user"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/user", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-deploy-token
@@ -2646,15 +2713,19 @@ description = "Identified a GitLab Deploy Token, risking access to repositories,
 regex = '''gldt-[0-9a-zA-Z_\-]{20}'''
 entropy = 3
 keywords = ["gldt-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/user"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/user", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-feature-flag-client-token
@@ -2715,16 +2786,20 @@ description = "Identified a GitLab Personal Access Token, risking unauthorized a
 regex = '''glpat-[\w-]{20}'''
 entropy = 3
 keywords = ["glpat-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/personal_access_tokens/self"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-extract = { name = "json:name", scopes = "json:scopes" }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/personal_access_tokens/self", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid",
+    "name": safeGet(r.json, "name", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-pat-routable
@@ -2735,16 +2810,20 @@ description = "Identified a GitLab Personal Access Token (routable), risking una
 regex = '''\bglpat-[0-9a-zA-Z_-]{27,300}\.[0-9a-z]{2}[0-9a-z]{7}\b'''
 entropy = 4
 keywords = ["glpat-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/personal_access_tokens/self"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-extract = { name = "json:name", scopes = "json:scopes" }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/personal_access_tokens/self", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid",
+    "name": safeGet(r.json, "name", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-ptt
@@ -2755,15 +2834,19 @@ description = "Found a GitLab Pipeline Trigger Token, potentially compromising c
 regex = '''glptt-[0-9a-f]{40}'''
 entropy = 3
 keywords = ["glptt-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/user"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/user", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-rrt
@@ -2774,16 +2857,19 @@ description = "Discovered a GitLab Runner Registration Token, posing a risk to C
 regex = '''GR1348941[\w-]{20}'''
 entropy = 3
 keywords = ["gr1348941"]
-[rules.validate]
-type = "http"
-method = "POST"
-url = "https://gitlab.com/api/v4/runners/verify"
-headers = { Content-Type = "application/x-www-form-urlencoded" }
-body = '''token={{ secret }}'''
-match = [
-    { status = 200, negative_words = ['token is missing', '403 Forbidden', ], result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.post("https://gitlab.com/api/v4/runners/verify", {
+    "Content-Type": "application/x-www-form-urlencoded"
+  }, "token=" + secret),
+  r.status == 200 && !r.body.contains("token is missing") && !r.body.contains("403 Forbidden") ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-runner-authentication-token
@@ -2794,15 +2880,19 @@ description = "Discovered a GitLab Runner Authentication Token, posing a risk to
 regex = '''glrt-[0-9a-zA-Z_\-]{20}'''
 entropy = 3
 keywords = ["glrt-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/user"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/user", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-runner-authentication-token-routable
@@ -2813,15 +2903,19 @@ description = "Discovered a GitLab Runner Authentication Token (Routable), posin
 regex = '''\bglrt-t\d_[0-9a-zA-Z_\-]{27,300}\.[0-9a-z]{2}[0-9a-z]{7}\b'''
 entropy = 4
 keywords = ["glrt-"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://gitlab.com/api/v4/user"
-headers = { PRIVATE-TOKEN = '{{ secret }}' }
-match = [
-    { status = 200, json = { id = "!empty" }, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://gitlab.com/api/v4/user", {
+    "PRIVATE-TOKEN": secret
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # gitlab-scim-token
@@ -2913,15 +3007,19 @@ description = "Identified a Groq API Key, which may expose high-speed AI inferen
 regex = '''(?i)\b(gsk_[A-Z0-9]{52})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3.5
 keywords = ["gsk_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.groq.com/openai/v1/models"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"id"', '"data"', ], words_all = true, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.groq.com/openai/v1/models", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"id"') && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # harness-api-key
@@ -2996,17 +3094,26 @@ description = "Discovered a Hugging Face Access token, which could lead to unaut
 regex = '''\b(hf_(?i:[a-z]{34}))(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 2
 keywords = ["hf_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://huggingface.co/api/whoami-v2"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"name"', '"id"', ], words_all = true, result = "valid" },
-    { status = 401, words = ['expired', ], result = "revoked" },
-    { status = [401, 403], result = "invalid" },
-    { status = 429, words = ['rate limit', ], result = "error" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://huggingface.co/api/whoami-v2", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 ? {
+    "result": "valid",
+    "username": safeGet(r.json, "name", "")
+  } : r.status == 401 && r.body.contains("expired") ? {
+    "result": "revoked",
+    "reason": "Token expired"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : r.status == 429 && r.body.contains("rate limit") ? {
+    "result": "error",
+    "reason": "Rate limited"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # huggingface-organization-api-token
@@ -3017,17 +3124,26 @@ description = "Uncovered a Hugging Face Organization API token, potentially comp
 regex = '''\b(api_org_(?i:[a-z]{34}))(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 2
 keywords = ["api_org_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://huggingface.co/api/whoami-v2"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"name"', '"id"', ], words_all = true, result = "valid" },
-    { status = 401, words = ['expired', ], result = "revoked" },
-    { status = [401, 403], result = "invalid" },
-    { status = 429, words = ['rate limit', ], result = "error" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://huggingface.co/api/whoami-v2", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 ? {
+    "result": "valid",
+    "username": safeGet(r.json, "name", "")
+  } : r.status == 401 && r.body.contains("expired") ? {
+    "result": "revoked",
+    "reason": "Token expired"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : r.status == 429 && r.body.contains("rate limit") ? {
+    "result": "error",
+    "reason": "Rate limited"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # infracost-api-token
@@ -3264,15 +3380,22 @@ id = "mailchimp-api-key"
 description = "Identified a Mailchimp API key, potentially compromising email marketing campaigns and subscriber data."
 regex = '''(?i)[\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([a-f0-9]{32}-us\d\d)(?:[\x60'"\s;]|\\[nr]|$)'''
 keywords = ["mailchimp"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = 'https://{{ secret | split: "-" | last }}.api.mailchimp.com/3.0/ping'
-headers = { Accept = "application/json", Authorization = 'Basic {{ "x:" | append: secret | b64enc }}' }
-match = [
-    { status = 200, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(dc, secret.substring(secret.lastIndexOf("-") + 1),
+  cel.bind(r,
+    http.get("https://" + dc + ".api.mailchimp.com/3.0/ping", {
+      "Accept": "application/json",
+      "Authorization": "Basic " + base64.encode(bytes("x:" + secret))
+    }),
+    r.status == 200 ? {
+      "result": "valid"
+    } : r.status in [401, 403] ? {
+      "result": "invalid",
+      "reason": "Unauthorized"
+    } : unknown(r)
+  )
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # mailgun-private-api-token
@@ -3282,15 +3405,20 @@ id = "mailgun-private-api-token"
 description = "Found a Mailgun private API token, risking unauthorized email service operations and data breaches."
 regex = '''(?i)[\w.-]{0,50}?(?:mailgun)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}(key-[a-f0-9]{32})(?:[\x60'"\s;]|\\[nr]|$)'''
 keywords = ["mailgun"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.mailgun.net/v3/domains"
-headers = { Accept = "application/json", Authorization = 'Basic {{ "api:" | append: secret | b64enc }}' }
-match = [
-    { status = 200, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.mailgun.net/v3/domains", {
+    "Accept": "application/json",
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret))
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # mailgun-pub-key
@@ -3386,15 +3514,20 @@ description = "Detected a Mistral AI API Key, which may expose AI language model
 regex = '''(?i)[\w.-]{0,50}?(?:mistral)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([A-Z0-9]{32})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3
 keywords = ["mistral"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.mistral.ai/v1/models"
-headers = { Accept = "application/json", Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"data"', ], result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.mistral.ai/v1/models", {
+    "Authorization": "Bearer " + secret,
+    "Accept": "application/json"
+  }),
+  r.status == 200 && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # netlify-access-token
@@ -3544,16 +3677,19 @@ description = "Found an OpenAI API Key, posing a risk of unauthorized access to 
 regex = '''\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3
 keywords = ["t3blbkfj"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.openai.com/v1/models"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, json = { data = "!empty", object = "list" }, result = "valid" },
-    { status = 401, json = { "error.code" = "invalid_api_key" }, result = "invalid" },
-    { status = 403, json = { "error.type" = "invalid_request_error" }, result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.openai.com/v1/models", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && safeGet(r.json, "object", "") == "list" ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # openrouter-api-key
@@ -3753,15 +3889,20 @@ description = "Detected a Replicate API Token, which may expose AI model hosting
 regex = '''(?i)\b(r8_[A-Za-z0-9]{37})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3
 keywords = ["r8_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.replicate.com/v1/account"
-headers = { Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"type"', '"username"', '"name"', ], words_all = true, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.replicate.com/v1/account", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"type"') && r.body.contains('"username"') && r.body.contains('"name"') ? {
+    "result": "valid",
+    "username": safeGet(r.json, "username", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # rubygems-api-token
@@ -4175,15 +4316,20 @@ description = "Detected a Together.ai API Key, which may expose access to open-s
 regex = '''(?i)\b(tgp_v1_[A-Za-z0-9_-]{43})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3
 keywords = ["tgp_v1_"]
-[rules.validate]
-type = "http"
-method = "GET"
-url = "https://api.together.xyz/v1/models"
-headers = { Accept = "application/json", Authorization = 'Bearer {{ secret }}' }
-match = [
-    { status = 200, words = ['"id"', '"object"', ], words_all = true, result = "valid" },
-    { status = [401, 403], result = "invalid" },
-]
+validate = '''
+cel.bind(r,
+  http.get("https://api.together.xyz/v1/models", {
+    "Authorization": "Bearer " + secret,
+    "Accept": "application/json"
+  }),
+  r.status == 200 && r.body.contains('"id"') && r.body.contains('"object"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # travisci-access-token

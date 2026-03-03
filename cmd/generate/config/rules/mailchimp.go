@@ -6,22 +6,6 @@ import (
 	"github.com/betterleaks/betterleaks/config"
 )
 
-func mailchimpValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    `https://{{ secret | split: "-" | last }}.api.mailchimp.com/3.0/ping`,
-		Headers: map[string]string{
-			"Accept":        "application/json",
-			"Authorization": `Basic {{ "x:" | append: secret | b64enc }}`,
-		},
-		Match: []config.MatchClause{
-			{StatusCodes: []int{200}, Result: "valid"},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
-
 func MailChimp() *config.Rule {
 	// define rule
 	r := config.Rule{
@@ -32,7 +16,20 @@ func MailChimp() *config.Rule {
 		Keywords: []string{
 			"mailchimp",
 		},
-		Validation: mailchimpValidation(),
+		ValidateCEL: `cel.bind(dc, secret.substring(secret.lastIndexOf("-") + 1),
+  cel.bind(r,
+    http.get("https://" + dc + ".api.mailchimp.com/3.0/ping", {
+      "Accept": "application/json",
+      "Authorization": "Basic " + base64.encode(bytes("x:" + secret))
+    }),
+    r.status == 200 ? {
+      "result": "valid"
+    } : r.status in [401, 403] ? {
+      "result": "invalid",
+      "reason": "Unauthorized"
+    } : unknown(r)
+  )
+)`,
 	}
 
 	// validate

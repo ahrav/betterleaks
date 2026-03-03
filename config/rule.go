@@ -59,9 +59,11 @@ type Rule struct {
 	// tokenize efficiently (i.e., common words/phrases) are filtered out.
 	TokenEfficiency bool
 
-	// Validation describes an HTTP request to fire to determine whether
-	// a detected secret is live (valid) or stale/invalid.
-	Validation *Validation
+	// ValidateCEL is the raw CEL expression used for secret validation.
+	ValidateCEL string
+
+	// celProgram is the compiled CEL program, set at config load time.
+	celProgram any
 }
 
 type Required struct {
@@ -70,8 +72,8 @@ type Required struct {
 	WithinColumns *int
 }
 
-// CheckForMisconfiguration guards against common misconfigurations.
-func (r *Rule) CheckForMisconfiguration() error {
+// Validate guards against common misconfigurations.
+func (r *Rule) Validate() error {
 	if r.validated {
 		return nil
 	}
@@ -114,4 +116,14 @@ func (r *Rule) CheckForMisconfiguration() error {
 
 	r.validated = true
 	return nil
+}
+
+// CelProgram returns the compiled CEL program for this rule, or nil.
+func (r *Rule) CelProgram() any {
+	return r.celProgram
+}
+
+// SetCelProgram stores a compiled CEL program on the rule.
+func (r *Rule) SetCelProgram(p any) {
+	r.celProgram = p
 }

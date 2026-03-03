@@ -6,22 +6,6 @@ import (
 	"github.com/betterleaks/betterleaks/config"
 )
 
-func deepseekValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    "https://api.deepseek.com/models",
-		Headers: map[string]string{
-			"Authorization": "Bearer {{ secret }}",
-			"Accept":        "application/json",
-		},
-		Match: []config.MatchClause{
-			{StatusCodes: []int{200}, Words: []string{`"data"`}, Result: "valid"},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
-
 func DeepSeek() *config.Rule {
 	r := config.Rule{
 		RuleID:      "deepseek-api-key",
@@ -29,7 +13,18 @@ func DeepSeek() *config.Rule {
 		Regex:       utils.GenerateSemiGenericRegex([]string{"deepseek"}, `sk-[a-f0-9]{32}`, true),
 		Keywords:    []string{"deepseek"},
 		Entropy:     3.5,
-		Validation:  deepseekValidation(),
+		ValidateCEL: `cel.bind(r,
+  http.get("https://api.deepseek.com/models", {
+    "Authorization": "Bearer " + secret,
+    "Accept": "application/json"
+  }),
+  r.status == 200 && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	tps := utils.GenerateSampleSecrets("deepseek", "sk-"+secrets.NewSecret(utils.Hex("32")))

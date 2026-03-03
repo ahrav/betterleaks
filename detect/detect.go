@@ -135,7 +135,17 @@ type Detector struct {
 
 	// ValidationStatusFilter, when non-empty, restricts which findings are
 	// printed in verbose mode. Parsed from --validation-status.
-	ValidationStatusFilter string
+	ValidationStatusFilter map[string]struct{}
+
+	// ValidationPool is the CEL validation worker pool.
+	ValidationPool *validate.Pool
+
+	// ValidationExtractEmpty controls whether empty values from extractors
+	// are included in validation output.
+	ValidationExtractEmpty bool
+
+	// findingsCh is used for streaming findings when DetectSourceStream is active.
+	findingsCh chan<- report.Finding
 
 	// IgnoreGitleaksAllow is a flag to ignore gitleaks:allow comments.
 	IgnoreGitleaksAllow bool
@@ -180,14 +190,6 @@ type Detector struct {
 	TotalBytes atomic.Uint64
 
 	tokenizer *tiktoken.Tiktoken
-
-	// validator is the optional validation worker pool.
-	validator   *validate.Validator
-	validateCh  chan report.Finding
-	validateWg  sync.WaitGroup
-	validatedMu sync.Mutex
-	validated   []report.Finding
-	validateCtx context.Context
 }
 
 // NewDetector creates a new detector with the given config
@@ -288,6 +290,30 @@ func (d *Detector) DetectString(content string) []report.Finding {
 
 // DetectSource scans the given source and returns a list of findings
 func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]report.Finding, error) {
+	// Wire up streaming print for validated findings so they appear as
+	// each validation resolves rather than being deferred to end-of-scan.
+	if d.ValidationPool != nil {
+		d.ValidationPool.OnResult = func(vr validate.ValidationResult) {
+			d.findingMutex.Lock()
+			defer d.findingMutex.Unlock()
+			for i := range d.findings {
+				if d.findings[i].Fingerprint == vr.Fingerprint {
+					meta := vr.Meta
+					if !d.ValidationExtractEmpty {
+						meta = stripEmptyMeta(meta)
+					}
+					d.findings[i].ValidationStatus = vr.Status
+					d.findings[i].ValidationReason = vr.Reason
+					d.findings[i].ValidationMeta = meta
+					if d.shouldVerbosePrint(d.findings[i]) {
+						printFinding(d.findings[i], d.NoColor)
+					}
+					break
+				}
+			}
+		}
+	}
+
 	err := source.Fragments(ctx, func(fragment sources.Fragment, err error) error {
 		logContext := logging.With()
 
@@ -343,6 +369,36 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 	if _, isGit := source.(*sources.Git); isGit {
 		logging.Info().Msgf("%d commits scanned.", len(d.commitMap))
 		logging.Debug().Msg("Note: this number might be smaller than expected due to commits with no additions")
+	}
+
+	// Close the validation pool and merge results.
+	if d.ValidationPool != nil {
+		d.ValidationPool.Close()
+
+		hits, misses := d.ValidationPool.Stats()
+		logging.Debug().
+			Uint64("http_requests", misses).
+			Uint64("cache_hits", hits).
+			Msg("validation cache stats")
+
+		// Merge any validation results that weren't handled by OnResult
+		// (defensive — OnResult should have covered all of these).
+		byFP := make(map[string]int, len(d.findings))
+		for i, f := range d.findings {
+			byFP[f.Fingerprint] = i
+		}
+		for _, vr := range d.ValidationPool.Results() {
+			if idx, ok := byFP[vr.Fingerprint]; ok {
+				if d.findings[idx].ValidationStatus == "" {
+					d.findings[idx].ValidationStatus = vr.Status
+					d.findings[idx].ValidationReason = vr.Reason
+					if !d.ValidationExtractEmpty {
+						vr.Meta = stripEmptyMeta(vr.Meta)
+					}
+					d.findings[idx].ValidationMeta = vr.Meta
+				}
+			}
+		}
 	}
 
 	return d.Findings(), err
@@ -764,14 +820,15 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 			for _, requiredFinding := range foundRequiredFindings {
 				if d.withinProximity(primaryFinding, requiredFinding, requiredRule) {
 					req := &report.RequiredFinding{
-						RuleID:      requiredFinding.RuleID,
-						StartLine:   requiredFinding.StartLine,
-						EndLine:     requiredFinding.EndLine,
-						StartColumn: requiredFinding.StartColumn,
-						EndColumn:   requiredFinding.EndColumn,
-						Line:        requiredFinding.Line,
-						Match:       requiredFinding.Match,
-						Secret:      requiredFinding.Secret,
+						RuleID:        requiredFinding.RuleID,
+						StartLine:     requiredFinding.StartLine,
+						EndLine:       requiredFinding.EndLine,
+						StartColumn:   requiredFinding.StartColumn,
+						EndColumn:     requiredFinding.EndColumn,
+						Line:          requiredFinding.Line,
+						Match:         requiredFinding.Match,
+						Secret:        requiredFinding.Secret,
+						CaptureGroups: requiredFinding.CaptureGroups,
 					}
 					requiredFindings = append(requiredFindings, req)
 				}
@@ -881,20 +938,75 @@ func (d *Detector) AddFinding(finding report.Finding) {
 		return
 	}
 
-	if d.validateCh != nil {
-		rule, ok := d.Config.Rules[finding.RuleID]
-		if ok && rule.Validation != nil {
-			d.validateCh <- finding
-			return
+	// Determine whether this finding needs async CEL validation.
+	needsValidation := false
+	var validationRule config.Rule
+	if d.ValidationPool != nil {
+		if rule, ok := d.Config.Rules[finding.RuleID]; ok && rule.CelProgram() != nil {
+			needsValidation = true
+			validationRule = rule
 		}
 	}
 
-	d.findingMutex.Lock()
-	d.findings = append(d.findings, finding)
-	if d.shouldVerbosePrint(finding) {
-		printFinding(finding, d.NoColor)
+	// Store the finding before submitting to the validation pool so that
+	// the Pool.OnResult callback can always locate it.
+	if d.findingsCh != nil {
+		d.findingsCh <- finding
+	} else {
+		d.findingMutex.Lock()
+		d.findings = append(d.findings, finding)
+		// Print immediately unless the finding was submitted for async
+		// validation. Validated findings are printed via Pool.OnResult.
+		if !needsValidation && d.shouldVerbosePrint(finding) {
+			printFinding(finding, d.NoColor)
+		}
+		d.findingMutex.Unlock()
 	}
-	d.findingMutex.Unlock()
+
+	// Submit to CEL validation pool if applicable.
+	if needsValidation {
+		reqs := finding.RequiredFindings()
+		if len(reqs) > 0 {
+			ruleIDs := make([]string, 0)
+			secretsByRule := make(map[string][]string)
+			seen := make(map[string]struct{})
+			type captureKey struct{ ruleID, secret string }
+			captureIndex := make(map[captureKey]map[string]string)
+			for _, req := range reqs {
+				if _, ok := seen[req.RuleID]; !ok {
+					seen[req.RuleID] = struct{}{}
+					ruleIDs = append(ruleIDs, req.RuleID)
+				}
+				secretsByRule[req.RuleID] = append(secretsByRule[req.RuleID], req.Secret)
+				if len(req.CaptureGroups) > 0 {
+					captureIndex[captureKey{req.RuleID, req.Secret}] = req.CaptureGroups
+				}
+			}
+			combos := validate.Combos(ruleIDs, secretsByRule)
+			for _, combo := range combos {
+				expanded := make(map[string]string, len(combo)*2)
+				for ruleID, secret := range combo {
+					expanded[ruleID] = secret
+					if caps, ok := captureIndex[captureKey{ruleID, secret}]; ok {
+						for name, val := range caps {
+							expanded[ruleID+":"+name] = val
+						}
+					}
+				}
+				d.ValidationPool.Submit(
+					finding.Fingerprint, finding.RuleID,
+					validationRule.CelProgram(), finding.Secret,
+					finding.CaptureGroups, expanded, len(combos),
+				)
+			}
+		} else {
+			d.ValidationPool.Submit(
+				finding.Fingerprint, finding.RuleID,
+				validationRule.CelProgram(), finding.Secret,
+				finding.CaptureGroups, nil, 1,
+			)
+		}
+	}
 }
 
 // Findings returns the findings added to the detector
@@ -902,116 +1014,19 @@ func (d *Detector) Findings() []report.Finding {
 	return d.findings
 }
 
-// shouldVerbosePrint returns true when the finding should be printed in
-// verbose mode. When ValidationStatusFilter is set, only findings whose
-// status passes the filter are printed. The pseudo-status "none" matches
-// findings that have not been validated (empty status).
 func (d *Detector) shouldVerbosePrint(f report.Finding) bool {
 	if !d.Verbose {
 		return false
 	}
-	if d.ValidationStatusFilter == "" {
-		return true
-	}
-	includeNone := false
-	allowed := make(map[report.ValidationStatus]struct{})
-	for _, s := range strings.Split(d.ValidationStatusFilter, ",") {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if strings.EqualFold(s, "none") {
-			includeNone = true
-			continue
-		}
-		allowed[report.ValidationStatus(strings.ToUpper(s))] = struct{}{}
-	}
-	if len(allowed) == 0 && !includeNone {
+	if len(d.ValidationStatusFilter) == 0 {
 		return true
 	}
 	if f.ValidationStatus == "" {
-		return includeNone
+		_, ok := d.ValidationStatusFilter["none"]
+		return ok
 	}
-	_, ok := allowed[f.ValidationStatus]
+	_, ok := d.ValidationStatusFilter[f.ValidationStatus]
 	return ok
-}
-
-// StartValidation spins up a pool of workers that validate findings asynchronously.
-// Findings whose rule has a [rules.validate] block will be sent to the pool from AddFinding.
-// Call DrainValidation after the scan completes to wait for all workers and collect results.
-func (d *Detector) StartValidation(ctx context.Context, v *validate.Validator, workers int) {
-	d.validator = v
-	d.validateCtx = ctx
-	d.validateCh = make(chan report.Finding, workers*2)
-	d.validated = make([]report.Finding, 0)
-
-	for range workers {
-		d.validateWg.Add(1)
-		go func() {
-			defer d.validateWg.Done()
-			for f := range d.validateCh {
-				v.ValidateFinding(ctx, &f)
-				d.validatedMu.Lock()
-				d.validated = append(d.validated, f)
-				if d.shouldVerbosePrint(f) {
-					printFinding(f, d.NoColor)
-				}
-				d.validatedMu.Unlock()
-			}
-		}()
-	}
-
-	logging.Debug().Int("workers", workers).Msg("validation worker pool started")
-}
-
-// Validating reports whether an async validation worker pool is running.
-func (d *Detector) Validating() bool {
-	return d.validateCh != nil
-}
-
-// ValidationsAttempted returns the total number of findings where validation
-// was attempted (i.e., the rule had a validate block and all placeholders
-// were present). Returns 0 if no validation pool was started.
-func (d *Detector) ValidationsAttempted() int64 {
-	if d.validator == nil {
-		return 0
-	}
-	return d.validator.Attempted.Load()
-}
-
-// ValidationCacheHits returns the number of validation lookups served from cache.
-func (d *Detector) ValidationCacheHits() int64 {
-	if d.validator == nil {
-		return 0
-	}
-	return d.validator.CacheHits.Load()
-}
-
-// ValidationHTTPRequests returns the number of actual outbound HTTP requests.
-func (d *Detector) ValidationHTTPRequests() int64 {
-	if d.validator == nil {
-		return 0
-	}
-	return d.validator.HTTPRequests.Load()
-}
-
-// WaitForValidation blocks until all in-flight validation workers finish,
-// then merges their results into the main findings slice. Safe to call
-// even if no validation pool was started (no-op).
-func (d *Detector) WaitForValidation() {
-	if d.validateCh == nil {
-		return
-	}
-
-	close(d.validateCh)
-	d.validateWg.Wait()
-
-	d.findingMutex.Lock()
-	d.findings = append(d.findings, d.validated...)
-	d.findingMutex.Unlock()
-
-	d.validated = nil
-	d.validateCh = nil
 }
 
 // AddCommit synchronously adds a commit to the commit slice

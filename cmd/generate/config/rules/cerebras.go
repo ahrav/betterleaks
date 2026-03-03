@@ -6,21 +6,6 @@ import (
 	"github.com/betterleaks/betterleaks/config"
 )
 
-func cerebrasValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    "https://api.cerebras.ai/v1/models",
-		Headers: map[string]string{
-			"Authorization": "Bearer {{ secret }}",
-		},
-		Match: []config.MatchClause{
-			{StatusCodes: []int{200}, Words: []string{`"object"`, `"data"`}, WordsAll: true, Result: "valid"},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
-
 func Cerebras() *config.Rule {
 	r := config.Rule{
 		RuleID:      "cerebras-api-key",
@@ -28,7 +13,17 @@ func Cerebras() *config.Rule {
 		Regex:       utils.GenerateUniqueTokenRegex(`csk-[a-z0-9]{48}`, true),
 		Keywords:    []string{"csk-"},
 		Entropy:     3.0,
-		Validation:  cerebrasValidation(),
+		ValidateCEL: `cel.bind(r,
+  http.get("https://api.cerebras.ai/v1/models", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"object"') && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	tps := utils.GenerateSampleSecrets("cerebras", "csk-"+secrets.NewSecret(utils.AlphaNumeric("48")))

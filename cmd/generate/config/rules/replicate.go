@@ -6,21 +6,6 @@ import (
 	"github.com/betterleaks/betterleaks/config"
 )
 
-func replicateValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    "https://api.replicate.com/v1/account",
-		Headers: map[string]string{
-			"Authorization": "Bearer {{ secret }}",
-		},
-		Match: []config.MatchClause{
-			{StatusCodes: []int{200}, Words: []string{`"type"`, `"username"`, `"name"`}, WordsAll: true, Result: "valid"},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
-
 func Replicate() *config.Rule {
 	r := config.Rule{
 		RuleID:      "replicate-api-token",
@@ -28,7 +13,18 @@ func Replicate() *config.Rule {
 		Regex:       utils.GenerateUniqueTokenRegex(`r8_[A-Za-z0-9]{37}`, true),
 		Keywords:    []string{"r8_"},
 		Entropy:     3.0,
-		Validation:  replicateValidation(),
+		ValidateCEL: `cel.bind(r,
+  http.get("https://api.replicate.com/v1/account", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"type"') && r.body.contains('"username"') && r.body.contains('"name"') ? {
+    "result": "valid",
+    "username": safeGet(r.json, "username", "")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	tps := utils.GenerateSampleSecrets("replicate", "r8_"+secrets.NewSecret(`[A-Za-z0-9]{37}`))

@@ -332,14 +332,21 @@ func printValidation(f report.Finding, noColor bool) {
 		statusStyle = lipgloss.NewStyle()
 	}
 
-	fmt.Printf("%-12s %s", "Validation:", statusStyle.Render(f.ValidationStatus))
+	fmt.Printf("%-12s %s", "Validation:", statusStyle.Render(strings.ToUpper(f.ValidationStatus)))
 	if f.ValidationReason != "" {
 		fmt.Printf("  (%s)", f.ValidationReason)
 	}
 	fmt.Println()
 
+	var metaStyle lipgloss.Style
+	if !noColor {
+		metaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ca3af"))
+	} else {
+		metaStyle = lipgloss.NewStyle()
+	}
+
 	for _, k := range sortedMapKeys(f.ValidationMeta) {
-		fmt.Printf("%-12s %s = %v\n", "", k, f.ValidationMeta[k])
+		fmt.Printf("  %s\n", metaStyle.Render(fmt.Sprintf("%-10s %v", k+" =", f.ValidationMeta[k])))
 	}
 }
 

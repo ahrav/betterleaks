@@ -188,9 +188,9 @@ cel.bind(r,
     "x-api-key": secret,
     "anthropic-version": "2023-06-01"
   }),
-  r.status == 200 && safeGet(r.json, "id", "") != "" && safeGet(r.json, "type", "") == "organization" ? {
+  r.status == 200 && r.json.?id.orValue("") != "" && r.json.?type.orValue("") == "organization" ? {
     "result": "valid",
-    "organization": safeGet(r.json, "name", "")
+    "organization": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2553,11 +2553,11 @@ cel.bind(r,
     "Accept": "application/vnd.github+json",
     "Authorization": "token " + secret
   }),
-  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2584,11 +2584,11 @@ cel.bind(r,
     "Accept": "application/vnd.github+json",
     "Authorization": "token " + secret
   }),
-  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2611,11 +2611,11 @@ cel.bind(r,
     "Accept": "application/vnd.github+json",
     "Authorization": "token " + secret
   }),
-  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2638,11 +2638,11 @@ cel.bind(r,
     "Accept": "application/vnd.github+json",
     "Authorization": "token " + secret
   }),
-  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2669,11 +2669,11 @@ cel.bind(r,
     "Accept": "application/vnd.github+json",
     "Authorization": "token " + secret
   }),
-  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2793,7 +2793,7 @@ cel.bind(r,
   }),
   r.status == 200 ? {
     "result": "valid",
-    "name": safeGet(r.json, "name", "")
+    "name": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -2817,7 +2817,7 @@ cel.bind(r,
   }),
   r.status == 200 ? {
     "result": "valid",
-    "name": safeGet(r.json, "name", "")
+    "name": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -3101,7 +3101,7 @@ cel.bind(r,
   }),
   r.status == 200 ? {
     "result": "valid",
-    "username": safeGet(r.json, "name", "")
+    "username": r.json.?name.orValue("")
   } : r.status == 401 && r.body.contains("expired") ? {
     "result": "revoked",
     "reason": "Token expired"
@@ -3131,7 +3131,7 @@ cel.bind(r,
   }),
   r.status == 200 ? {
     "result": "valid",
-    "username": safeGet(r.json, "name", "")
+    "username": r.json.?name.orValue("")
   } : r.status == 401 && r.body.contains("expired") ? {
     "result": "revoked",
     "reason": "Token expired"
@@ -3682,7 +3682,7 @@ cel.bind(r,
   http.get("https://api.openai.com/v1/models", {
     "Authorization": "Bearer " + secret
   }),
-  r.status == 200 && safeGet(r.json, "object", "") == "list" ? {
+  r.status == 200 && r.json.?object.orValue("") == "list" ? {
     "result": "valid"
   } : r.status in [401, 403] ? {
     "result": "invalid",
@@ -3896,7 +3896,7 @@ cel.bind(r,
   }),
   r.status == 200 && r.body.contains('"type"') && r.body.contains('"username"') && r.body.contains('"name"') ? {
     "result": "valid",
-    "username": safeGet(r.json, "username", "")
+    "username": r.json.?username.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -4512,6 +4512,22 @@ keywords = [
     "wandb",
     "weightsandbiases",
 ]
+validate = '''
+cel.bind(r,
+  http.post("https://api.wandb.ai/graphql", {
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret)),
+    "Content-Type": "application/json"
+  }, "{\"query\":\"query { viewer { email username } }\"}"),
+  r.status == 200 && r.body.contains("\"username\"") ? {
+    "result": "valid",
+    "email": r.json.?data.?viewer.?email.orValue(""),
+    "username": r.json.?data.?viewer.?username.orValue("")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # weights-and-biases-api-key-v1
@@ -4522,6 +4538,22 @@ description = "Detected a Weights & Biases v1 API Key (wandb_v1_), which may exp
 regex = '''(?i)\b(wandb_v1_[A-Za-z0-9_]{77})(?:[\x60'"\s;]|\\[nr]|$)'''
 entropy = 3.5
 keywords = ["wandb_v1_"]
+validate = '''
+cel.bind(r,
+  http.post("https://api.wandb.ai/graphql", {
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret)),
+    "Content-Type": "application/json"
+  }, "{\"query\":\"query { viewer { email username } }\"}"),
+  r.status == 200 && r.body.contains("\"username\"") ? {
+    "result": "valid",
+    "email": r.json.?data.?viewer.?email.orValue(""),
+    "username": r.json.?data.?viewer.?username.orValue("")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)
+'''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # xai-api-key

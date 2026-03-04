@@ -20,7 +20,7 @@ func OpenAI() *config.Rule {
   http.get("https://api.openai.com/v1/models", {
     "Authorization": "Bearer " + secret
   }),
-  r.status == 200 && safeGet(r.json, "object", "") == "list" ? {
+  r.status == 200 && r.json.?object.orValue("") == "list" ? {
     "result": "valid"
   } : r.status in [401, 403] ? {
     "result": "invalid",

@@ -63,9 +63,9 @@ func AnthropicAdminApiKey() *config.Rule {
     "x-api-key": secret,
     "anthropic-version": "2023-06-01"
   }),
-  r.status == 200 && safeGet(r.json, "id", "") != "" && safeGet(r.json, "type", "") == "organization" ? {
+  r.status == 200 && r.json.?id.orValue("") != "" && r.json.?type.orValue("") == "organization" ? {
     "result": "valid",
-    "organization": safeGet(r.json, "name", "")
+    "organization": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"

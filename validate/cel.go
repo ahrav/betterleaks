@@ -89,6 +89,7 @@ func NewEnvironment(httpClient *http.Client) (*Environment, error) {
 	}
 
 	env, err := cel.NewEnv(
+		cel.OptionalTypes(),
 		ext.Bindings(),
 		ext.Strings(),
 		ext.Encoders(),
@@ -113,37 +114,6 @@ func NewEnvironment(httpClient *http.Client) (*Environment, error) {
 				},
 				cel.MapType(cel.StringType, cel.DynType),
 				cel.FunctionBinding(httpPostBinding(e)),
-			),
-		),
-
-		// safeGet(map, key, default) returns the string value at key, or default
-		// if the key is missing or the value is not a string.
-		cel.Function("safeGet",
-			cel.Overload("safeGet_map_string_string",
-				[]*cel.Type{cel.MapType(cel.StringType, cel.DynType), cel.StringType, cel.StringType},
-				cel.StringType,
-				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					key, ok := args[1].(types.String)
-					if !ok {
-						return types.NewErr("safeGet: key must be a string")
-					}
-					def, ok := args[2].(types.String)
-					if !ok {
-						return types.NewErr("safeGet: default must be a string")
-					}
-					m := make(map[string]any)
-					if nativeVal, err := args[0].ConvertToNative(mapAnyType); err == nil {
-						if h, ok := nativeVal.(map[string]any); ok {
-							m = h
-						}
-					}
-					if v, ok := m[string(key)]; ok {
-						if s, ok := v.(string); ok {
-							return types.String(s)
-						}
-					}
-					return def
-				}),
 			),
 		),
 

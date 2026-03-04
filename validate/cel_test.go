@@ -35,7 +35,7 @@ var celExpressions = []struct {
   }),
   r.status == 200 ? {
     "result": "valid",
-    "organization": safeGet(r.json, "name", "")
+    "organization": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -109,9 +109,9 @@ var celExpressions = []struct {
   }),
   r.status == 200 ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -140,7 +140,7 @@ var celExpressions = []struct {
   }),
   r.status == 200 ? {
     "result": "valid",
-    "name": safeGet(r.json, "name", "")
+    "name": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -183,7 +183,7 @@ var celExpressions = []struct {
   }),
   r.status == 200 ? {
     "result": "valid",
-    "username": safeGet(r.json, "name", "")
+    "username": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
@@ -287,6 +287,23 @@ var celExpressions = []struct {
   }),
   r.status == 200 ? {
     "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
+	},
+	{
+		"weights-and-biases-api-key",
+		`cel.bind(r,
+  http.post("https://api.wandb.ai/graphql", {
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret)),
+    "Content-Type": "application/json"
+  }, "{\"query\":\"query { viewer { email username } }\"}"),
+  r.status == 200 && r.body.contains("\"username\"") ? {
+    "result": "valid",
+    "email": r.json.?data.?viewer.?email.orValue(""),
+    "username": r.json.?data.?viewer.?username.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"

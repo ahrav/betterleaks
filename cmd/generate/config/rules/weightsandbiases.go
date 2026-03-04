@@ -13,6 +13,20 @@ func WeightsAndBiases() *config.Rule {
 		Regex:       utils.GenerateSemiGenericRegex([]string{"wandb", "weightsandbiases"}, utils.Hex("40"), true),
 		Keywords:    []string{"wandb", "weightsandbiases"},
 		Entropy:     3.5,
+		ValidateCEL: `cel.bind(r,
+  http.post("https://api.wandb.ai/graphql", {
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret)),
+    "Content-Type": "application/json"
+  }, "{\"query\":\"query { viewer { email username } }\"}"),
+  r.status == 200 && r.body.contains("\"username\"") ? {
+    "result": "valid",
+    "email": r.json.?data.?viewer.?email.orValue(""),
+    "username": r.json.?data.?viewer.?username.orValue("")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	tps := utils.GenerateSampleSecrets("wandb_api_key", secrets.NewSecret(utils.Hex("40")))
@@ -32,6 +46,20 @@ func WeightsAndBiasesV1() *config.Rule {
 		Regex:       utils.GenerateUniqueTokenRegex(`wandb_v1_[A-Za-z0-9_]{77}`, true),
 		Keywords:    []string{"wandb_v1_"},
 		Entropy:     3.5,
+		ValidateCEL: `cel.bind(r,
+  http.post("https://api.wandb.ai/graphql", {
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret)),
+    "Content-Type": "application/json"
+  }, "{\"query\":\"query { viewer { email username } }\"}"),
+  r.status == 200 && r.body.contains("\"username\"") ? {
+    "result": "valid",
+    "email": r.json.?data.?viewer.?email.orValue(""),
+    "username": r.json.?data.?viewer.?username.orValue("")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	tps := utils.GenerateSampleSecrets("wandb", "wandb_v1_"+secrets.NewSecret(`[A-Za-z0-9_]{77}`))

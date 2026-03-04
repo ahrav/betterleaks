@@ -32,7 +32,7 @@ const (
   }),
   r.status == 200 ? {
     "result": "valid",
-    "name": safeGet(r.json, "name", "")
+    "name": r.json.?name.orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"

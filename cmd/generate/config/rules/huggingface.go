@@ -28,7 +28,7 @@ func HuggingFaceAccessToken() *config.Rule {
   }),
   r.status == 200 ? {
     "result": "valid",
-    "username": safeGet(r.json, "name", "")
+    "username": r.json.?name.orValue("")
   } : r.status == 401 && r.body.contains("expired") ? {
     "result": "revoked",
     "reason": "Token expired"
@@ -102,7 +102,7 @@ func HuggingFaceOrganizationApiToken() *config.Rule {
   }),
   r.status == 200 ? {
     "result": "valid",
-    "username": safeGet(r.json, "name", "")
+    "username": r.json.?name.orValue("")
   } : r.status == 401 && r.body.contains("expired") ? {
     "result": "revoked",
     "reason": "Token expired"

@@ -12,11 +12,11 @@ const githubTokenCEL = `cel.bind(r,
     "Accept": "application/vnd.github+json",
     "Authorization": "token " + secret
   }),
-  r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
     "result": "valid",
-    "username": safeGet(r.json, "login", ""),
-    "name": safeGet(r.json, "name", ""),
-    "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"

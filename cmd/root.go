@@ -472,6 +472,15 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 		detector.Reporter = reporter
 	}
 
+	setupValidation(cmd, cfg, detector)
+
+	return detector
+}
+
+// setupValidation reads validation flags, compiles CEL programs into cfg.Rules
+// (mutations propagate to detector.Config.Rules via shared map), creates the
+// pool, and wires status-filter settings onto the detector.
+func setupValidation(cmd *cobra.Command, cfg config.Config, detector *detect.Detector) {
 	enableValidation := mustGetBoolFlag(cmd, "validation")
 
 	experimentsStr := mustGetStringFlag(cmd, "experiments")
@@ -484,49 +493,49 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 		enableValidation = false
 	}
 
-	if enableValidation {
-		workers := mustGetIntFlag(cmd, "validation-workers")
-		timeout, _ := cmd.Flags().GetDuration("validation-timeout")
-		env, err := validate.NewEnvironment(&http.Client{Timeout: timeout})
-		if err != nil {
-			logging.Fatal().Err(err).Msg("failed to create CEL validation environment")
-		}
-		if mustGetBoolFlag(cmd, "validation-debug") {
-			env.DebugResponse = true
-		}
-		if mustGetBoolFlag(cmd, "validation-extract-empty") {
-			detector.ValidationExtractEmpty = true
-		}
+	if !enableValidation {
+		return
+	}
 
-		for ruleID, rule := range cfg.Rules {
-			if rule.ValidateCEL == "" {
-				continue
-			}
-			prg, compileErr := env.Compile(rule.ValidateCEL)
-			if compileErr != nil {
-				logging.Fatal().Err(compileErr).Str("rule", ruleID).
-					Msg("failed to compile CEL validation expression")
-			}
-			rule.SetCelProgram(prg)
-			cfg.Rules[ruleID] = rule
+	workers := mustGetIntFlag(cmd, "validation-workers")
+	timeout, _ := cmd.Flags().GetDuration("validation-timeout")
+	env, err := validate.NewEnvironment(&http.Client{Timeout: timeout})
+	if err != nil {
+		logging.Fatal().Err(err).Msg("failed to create CEL validation environment")
+	}
+	if mustGetBoolFlag(cmd, "validation-debug") {
+		env.DebugResponse = true
+	}
+	if mustGetBoolFlag(cmd, "validation-extract-empty") {
+		detector.ValidationExtractEmpty = true
+	}
+
+	for ruleID, rule := range cfg.Rules {
+		if rule.ValidateCEL == "" {
+			continue
 		}
+		prg, compileErr := env.Compile(rule.ValidateCEL)
+		if compileErr != nil {
+			logging.Fatal().Err(compileErr).Str("rule", ruleID).
+				Msg("failed to compile CEL validation expression")
+		}
+		rule.SetCelProgram(prg)
+		cfg.Rules[ruleID] = rule
+	}
 
-		pool := validate.NewPool(workers, env)
-		detector.ValidationPool = pool
+	pool := validate.NewPool(workers, env)
+	detector.ValidationPool = pool
 
-		statusFilter, _ := cmd.Flags().GetString("validation-status")
-		if statusFilter != "" {
-			detector.ValidationStatusFilter = make(map[string]struct{})
-			for _, s := range strings.Split(statusFilter, ",") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					detector.ValidationStatusFilter[s] = struct{}{}
-				}
+	statusFilter, _ := cmd.Flags().GetString("validation-status")
+	if statusFilter != "" {
+		detector.ValidationStatusFilter = make(map[string]struct{})
+		for _, s := range strings.Split(statusFilter, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				detector.ValidationStatusFilter[s] = struct{}{}
 			}
 		}
 	}
-
-	return detector
 }
 
 func bytesConvert(bytes uint64) string {

@@ -144,8 +144,9 @@ type Detector struct {
 	// are included in validation output.
 	ValidationExtractEmpty bool
 
-	// findingsCh is used for streaming findings when DetectSourceStream is active.
-	findingsCh chan<- report.Finding
+	// findingsCh is created by DetectSource and carries all ready-to-display
+	// findings. A single consumer goroutine reads from it.
+	findingsCh chan report.Finding
 
 	// IgnoreGitleaksAllow is a flag to ignore gitleaks:allow comments.
 	IgnoreGitleaksAllow bool
@@ -157,10 +158,6 @@ type Detector struct {
 	// commitMap is used to keep track of commits that have been scanned.
 	// This is only used for logging purposes and git scans.
 	commitMap map[string]bool
-
-	// findingMutex is to prevent concurrent access to the
-	// findings slice when adding findings.
-	findingMutex *sync.Mutex
 
 	// findings is a slice of report.Findings. This is the result
 	// of the detector's scan which can then be used to generate a
@@ -210,7 +207,6 @@ func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
 	return &Detector{
 		commitMap:      make(map[string]bool),
 		gitleaksIgnore: make(map[string]struct{}),
-		findingMutex:   &sync.Mutex{},
 		commitMutex:    &sync.Mutex{},
 		findings:       make([]report.Finding, 0),
 		Config:         cfg,
@@ -290,29 +286,26 @@ func (d *Detector) DetectString(content string) []report.Finding {
 
 // DetectSource scans the given source and returns a list of findings
 func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]report.Finding, error) {
-	// Wire up streaming print for validated findings so they appear as
-	// each validation resolves rather than being deferred to end-of-scan.
+	d.findingsCh = make(chan report.Finding, 1000)
 	if d.ValidationPool != nil {
-		d.ValidationPool.OnResult = func(vr validate.ValidationResult) {
-			d.findingMutex.Lock()
-			defer d.findingMutex.Unlock()
-			for i := range d.findings {
-				if d.findings[i].Fingerprint == vr.Fingerprint {
-					meta := vr.Meta
-					if !d.ValidationExtractEmpty {
-						meta = stripEmptyMeta(meta)
-					}
-					d.findings[i].ValidationStatus = vr.Status
-					d.findings[i].ValidationReason = vr.Reason
-					d.findings[i].ValidationMeta = meta
-					if d.shouldVerbosePrint(d.findings[i]) {
-						printFinding(d.findings[i], d.NoColor)
-					}
-					break
-				}
+		d.ValidationPool.FindingsCh = d.findingsCh
+	}
+
+	// non-validation rule findings get printed in d.AddFinding().
+	// But we have to do it here.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for f := range d.findingsCh {
+			if !d.ValidationExtractEmpty {
+				f.ValidationMeta = stripEmptyMeta(f.ValidationMeta)
+			}
+			d.findings = append(d.findings, f)
+			if d.shouldVerbosePrint(f) {
+				printFinding(f, d.NoColor)
 			}
 		}
-	}
+	}()
 
 	err := source.Fragments(ctx, func(fragment sources.Fragment, err error) error {
 		logContext := logging.With()
@@ -371,7 +364,6 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 		logging.Debug().Msg("Note: this number might be smaller than expected due to commits with no additions")
 	}
 
-	// Close the validation pool and merge results.
 	if d.ValidationPool != nil {
 		d.ValidationPool.Close()
 
@@ -380,26 +372,10 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 			Uint64("http_requests", misses).
 			Uint64("cache_hits", hits).
 			Msg("validation cache stats")
-
-		// Merge any validation results that weren't handled by OnResult
-		// (defensive — OnResult should have covered all of these).
-		byFP := make(map[string]int, len(d.findings))
-		for i, f := range d.findings {
-			byFP[f.Fingerprint] = i
-		}
-		for _, vr := range d.ValidationPool.Results() {
-			if idx, ok := byFP[vr.Fingerprint]; ok {
-				if d.findings[idx].ValidationStatus == "" {
-					d.findings[idx].ValidationStatus = vr.Status
-					d.findings[idx].ValidationReason = vr.Reason
-					if !d.ValidationExtractEmpty {
-						vr.Meta = stripEmptyMeta(vr.Meta)
-					}
-					d.findings[idx].ValidationMeta = vr.Meta
-				}
-			}
-		}
 	}
+
+	close(d.findingsCh)
+	<-done
 
 	return d.Findings(), err
 }
@@ -905,7 +881,8 @@ func abs(x int) int {
 	return x
 }
 
-// AddFinding synchronously adds a finding to the findings slice
+// AddFinding adds a finding to the pipeline. Findings needing CEL validation
+// are submitted to the pool; all others go directly to findingsCh.
 func (d *Detector) AddFinding(finding report.Finding) {
 	globalFingerprint := fmt.Sprintf("%s:%s:%d", finding.File, finding.RuleID, finding.StartLine)
 	if finding.Commit != "" {
@@ -938,74 +915,51 @@ func (d *Detector) AddFinding(finding report.Finding) {
 		return
 	}
 
-	// Determine whether this finding needs async CEL validation.
-	needsValidation := false
-	var validationRule config.Rule
 	if d.ValidationPool != nil {
 		if rule, ok := d.Config.Rules[finding.RuleID]; ok && rule.CelProgram() != nil {
-			needsValidation = true
-			validationRule = rule
+			d.submitValidation(finding, rule)
+			return
 		}
 	}
 
-	// Store the finding before submitting to the validation pool so that
-	// the Pool.OnResult callback can always locate it.
-	if d.findingsCh != nil {
-		d.findingsCh <- finding
-	} else {
-		d.findingMutex.Lock()
-		d.findings = append(d.findings, finding)
-		// Print immediately unless the finding was submitted for async
-		// validation. Validated findings are printed via Pool.OnResult.
-		if !needsValidation && d.shouldVerbosePrint(finding) {
-			printFinding(finding, d.NoColor)
-		}
-		d.findingMutex.Unlock()
-	}
+	d.findingsCh <- finding
+}
 
-	// Submit to CEL validation pool if applicable.
-	if needsValidation {
-		reqs := finding.RequiredFindings()
-		if len(reqs) > 0 {
-			ruleIDs := make([]string, 0)
-			secretsByRule := make(map[string][]string)
-			seen := make(map[string]struct{})
-			type captureKey struct{ ruleID, secret string }
-			captureIndex := make(map[captureKey]map[string]string)
-			for _, req := range reqs {
-				if _, ok := seen[req.RuleID]; !ok {
-					seen[req.RuleID] = struct{}{}
-					ruleIDs = append(ruleIDs, req.RuleID)
-				}
-				secretsByRule[req.RuleID] = append(secretsByRule[req.RuleID], req.Secret)
-				if len(req.CaptureGroups) > 0 {
-					captureIndex[captureKey{req.RuleID, req.Secret}] = req.CaptureGroups
-				}
+// submitValidation expands combo required-rule findings and submits each to
+// the validation pool.
+func (d *Detector) submitValidation(finding report.Finding, rule config.Rule) {
+	reqs := finding.RequiredFindings()
+	if len(reqs) > 0 {
+		ruleIDs := make([]string, 0)
+		secretsByRule := make(map[string][]string)
+		seen := make(map[string]struct{})
+		type captureKey struct{ ruleID, secret string }
+		captureIndex := make(map[captureKey]map[string]string)
+		for _, req := range reqs {
+			if _, ok := seen[req.RuleID]; !ok {
+				seen[req.RuleID] = struct{}{}
+				ruleIDs = append(ruleIDs, req.RuleID)
 			}
-			combos := validate.Combos(ruleIDs, secretsByRule)
-			for _, combo := range combos {
-				expanded := make(map[string]string, len(combo)*2)
-				for ruleID, secret := range combo {
-					expanded[ruleID] = secret
-					if caps, ok := captureIndex[captureKey{ruleID, secret}]; ok {
-						for name, val := range caps {
-							expanded[ruleID+":"+name] = val
-						}
+			secretsByRule[req.RuleID] = append(secretsByRule[req.RuleID], req.Secret)
+			if len(req.CaptureGroups) > 0 {
+				captureIndex[captureKey{req.RuleID, req.Secret}] = req.CaptureGroups
+			}
+		}
+		combos := validate.Combos(ruleIDs, secretsByRule)
+		for _, combo := range combos {
+			expanded := make(map[string]string, len(combo)*2)
+			for ruleID, secret := range combo {
+				expanded[ruleID] = secret
+				if caps, ok := captureIndex[captureKey{ruleID, secret}]; ok {
+					for name, val := range caps {
+						expanded[ruleID+":"+name] = val
 					}
 				}
-				d.ValidationPool.Submit(
-					finding.Fingerprint, finding.RuleID,
-					validationRule.CelProgram(), finding.Secret,
-					finding.CaptureGroups, expanded, len(combos),
-				)
 			}
-		} else {
-			d.ValidationPool.Submit(
-				finding.Fingerprint, finding.RuleID,
-				validationRule.CelProgram(), finding.Secret,
-				finding.CaptureGroups, nil, 1,
-			)
+			d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, expanded, len(combos))
 		}
+	} else {
+		d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, nil, 1)
 	}
 }
 

@@ -52,7 +52,7 @@ Great question. Check out what we're cookin in the [v2 branch](https://github.co
 ```
 # Package managers
 brew install betterleaks
-brew install betterleaks/tap/betterleaks 
+brew install betterleaks/tap/betterleaks
 
 # Containers
 docker pull ghcr.io/betterleaks/betterleaks:latest
@@ -454,78 +454,35 @@ fragment = section of data gitleaks is looking at
    └───-3C────0L───+3C┴─┘ └────────────┘
 ```
 
+## Secrets Validation
+**⚠️ Secrets Validation is an experimental feature. To enable it, pass --experiments=validation.**
 
-#### Secrets Validation
-⚠️ **Secrets Validation is an experimental feature and likely to change. Feel free to play with it and tweak your configs but don't be sad when we change it... because we are exploring _new_ and _cool_ ideas.** To enable validation you must pass `--experiments=validation`.
-⚠️
+Betterleaks can automatically verify if a detected secret is live by making an HTTP request defined in the rule's validate field. Validation runs asynchronously, and responses are cached in-memory so duplicate secrets only trigger a single network request.
 
-Betterleaks can automatically check whether a detected secret is live by making an HTTP request defined in a `validate` field on the rule. Validation runs asynchronously during the scan with a configurable worker pool (default: 10). Responses are cached in-memory per scan so duplicate requests (e.g., the same API key found in multiple files) only hit the network once.
+### CEL Expressions
+Rules use [CEL (Common Expression Language)](https://cel.dev/) for validation logic. The expression receives the captured secret, fires an HTTP request (more validation kidns to come), and returns a status map.
 
-##### CEL Expressions
+### Variables & Functions:
 
-Each rule's `validate` field is a [CEL (Common Expression Language)](https://cel.dev) expression. CEL is a simple, safe, and fast expression language. The expression receives the captured `secret` and any named regex `captures`, fires one or more HTTP requests, and returns a result indicating the secret's status.
+- `secret` (string): The captured secret value.
+- `captures` (map): Named capture groups from the rule's regex.
+- `http.get(url, headers)` / `http.post(url, headers, body)`: Fires the HTTP request.
+- `cel.bind(name, value, expr)`: Binds a variable to avoid repeating sub-expressions.
+- `unknown(response)`: Helper returning `{"result": "unknown", "reason": "HTTP <status>"}`.
 
-**Variables available in every expression:**
+### The Response Object (r):
+- `r.status` (int): HTTP status code.
+- `r.body` (string): Raw response body.
+- `r.json` (dyn): Parsed JSON body.
+- `r.headers` (map): Response headers (all keys lowercased).
 
-| Variable | Type | Description |
-|---|---|---|
-| `secret` | `string` | The captured secret value |
-| `captures` | `map<string, string>` | Named capture groups from the rule's regex (`(?P<name>...)`) |
+### Result Format
+Expressions should return a map with a `"result"` key set to `valid`, `invalid`, `revoked`, `unknown`, or `error`. Any additional keys in the map are attached to the finding as metadata. 
 
-**HTTP functions:**
+Example
+Here is a standard validation block for a GitHub Personal Access Token. It uses CEL's optional chaining (.? and .orValue()) to safely extract metadata from the JSON response:
 
-| Function | Signature | Description |
-|---|---|---|
-| `http.get` | `(url string, headers map<string,string>) → response` | Fire a GET request |
-| `http.post` | `(url string, headers map<string,string>, body string) → response` | Fire a POST request |
-
-**Response object fields** (the map returned by `http.get` / `http.post`):
-
-| Field | Type | Description |
-|---|---|---|
-| `r.status` | `int` | HTTP status code |
-| `r.body` | `string` | Raw response body |
-| `r.json` | `dyn` | Parsed JSON body (map or list); empty map `{}` if not valid JSON |
-| `r.headers` | `map<string, string>` | Response headers (all keys lowercased) |
-
-**Helper functions:**
-
-| Function | Description |
-|---|---|
-| `safeGet(map, key, default)` | Returns `map[key]` as a string, or `default` if missing or not a string |
-| `unknown(response)` | Returns `{"result": "unknown", "reason": "HTTP <status>"}` — useful as a fallback |
-| `cel.bind(name, value, expr)` | Binds `value` to `name` within `expr` — avoids repeating sub-expressions |
-
-**String / encoding functions** (from CEL extensions):
-
-| Function | Description |
-|---|---|
-| `s.substring(start)` | Substring from index |
-| `s.lastIndexOf(sub)` | Last index of substring, or `-1` |
-| `base64.encode(bytes(s))` | Base64-encode a string — use for `Authorization: Basic` headers |
-
-##### Result Format
-
-An expression can return:
-- **`true`** → `valid`
-- **`false`** → `invalid`
-- **A map** with a `"result"` key set to one of `valid`, `invalid`, `revoked`, `unknown`, or `error`. All other keys in the map are attached as metadata on the finding.
-
-```cel
-# Boolean shorthand
-r.status == 200
-
-# Map with status and metadata
-{
-  "result": "valid",
-  "reason": "authenticated",
-  "username": safeGet(r.json, "login", "")
-}
-```
-
-##### Simple Example — GitHub PAT
-
-```toml
+Ini, TOML
 [[rules]]
 id = "github-pat"
 regex = '''ghp_[0-9a-zA-Z]{36}'''
@@ -536,147 +493,19 @@ validate = '''
       "Accept": "application/vnd.github+json",
       "Authorization": "token " + secret
     }),
-    r.status == 200 && safeGet(r.json, "login", "") != "" ? {
+    r.status == 200 ? {
       "result": "valid",
-      "username": safeGet(r.json, "login", ""),
-      "name": safeGet(r.json, "name", ""),
-      "scopes": safeGet(r.headers, "x-oauth-scopes", "")
+      "username": r.json.?login.orValue(""),
+      "name": r.json.?name.orValue(""),
+      "scopes": r.headers[?"x-oauth-scopes"].orValue("")
     } : r.status in [401, 403] ? {
       "result": "invalid",
       "reason": "Unauthorized"
     } : unknown(r)
   )
 '''
-```
+Note: For more complex validation setups—such as dynamically constructing URLs, using Basic Auth, or validating multi-part composite rules ([[rules.required]])—check out the existing examples in our built-in rules directory.
 
-##### Complex Example — Mailchimp (dynamic datacenter + Basic auth)
-
-Mailchimp API keys embed the datacenter in the key itself (`key-us18`), so the validation URL must be constructed dynamically:
-
-```toml
-[[rules]]
-id = "mailchimp-api-key"
-regex = '''(?i)[0-9a-f]{32}-us[0-9]{1,2}'''
-keywords = ["mailchimp"]
-validate = '''
-  cel.bind(dc, secret.substring(secret.lastIndexOf("-") + 1),
-    cel.bind(r,
-      http.get("https://" + dc + ".api.mailchimp.com/3.0/ping", {
-        "Accept": "application/json",
-        "Authorization": "Basic " + base64.encode(bytes("x:" + secret))
-      }),
-      r.status == 200 ? {
-        "result": "valid"
-      } : r.status in [401, 403] ? {
-        "result": "invalid",
-        "reason": "Unauthorized"
-      } : unknown(r)
-    )
-  )
-'''
-```
-
-##### Composite Rules (multi-part secrets)
-
-Some secrets require two separate values to validate — for example, a service that needs both an account ID and an auth token. Betterleaks supports this with `[[rules.required]]`, which links rules together. When the primary rule fires and the required rule's pattern is also found nearby, both secrets are bundled into a single finding.
-
-The CEL expression on the **primary rule** receives:
-
-| `captures` key | Value |
-|---|---|
-| `captures["required-rule-id"]` | The matched secret from the required rule |
-| `captures["required-rule-id:capture-name"]` | A named capture group from the required rule's regex |
-
-If multiple instances of a required rule are found, all combinations are tested (cartesian product) and the best result wins (`valid` > `invalid` > `revoked` > `unknown` > `error`). A `valid` result short-circuits the remaining combinations.
-
-**Example — Twilio (Account SID + Auth Token):**
-
-```toml
-# Rule 1: match the Account SID only (no validate — it's only meaningful combined)
-[[rules]]
-id = "twilio-account-sid"
-regex = '''(AC[a-f0-9]{32})'''
-keywords = ["twilio", "AC"]
-skipReport = true
-
-# Rule 2: match the auth token and require Rule 1 to be nearby
-[[rules]]
-id = "twilio-auth-token"
-regex = '''(?i)twilio[^"'\n]{0,20}?([a-f0-9]{32})'''
-keywords = ["twilio"]
-secretGroup = 1
-validate = '''
-  cel.bind(sid, captures["twilio-account-sid"],
-    cel.bind(r,
-      http.get("https://api.twilio.com/2010-04-01/Accounts/" + sid + ".json", {
-        "Authorization": "Basic " + base64.encode(bytes(sid + ":" + secret))
-      }),
-      r.status == 200 ? {
-        "result": "valid",
-        "account_sid": sid,
-        "friendly_name": safeGet(r.json, "friendly_name", "")
-      } : r.status == 401 ? {
-        "result": "invalid",
-        "reason": "Unauthorized"
-      } : unknown(r)
-    )
-  )
-'''
-
-[[rules.required]]
-id = "twilio-account-sid"
-withinLines = 5
-```
-
-The `[[rules.required]]` section controls proximity matching:
-
-| Field | Description |
-|---|---|
-| `id` | Rule ID that must also fire nearby |
-| `withinLines` | Required rule must match within ±N lines of the primary |
-| `withinColumns` | Required rule must match within ±N columns of the primary |
-
-If neither `withinLines` nor `withinColumns` is set, the required rule just needs to appear anywhere in the same scanned fragment.
-
-##### Validation Statuses
-
-| Status | Meaning |
-|---|---|
-| `valid` | Secret is live and active |
-| `invalid` | Secret is not recognised — stale or never valid |
-| `revoked` | Secret was once valid but has been explicitly revoked |
-| `unknown` | Validation ran but could not determine status (unexpected HTTP response) |
-| `error` | Network/request error — the HTTP call itself failed |
-| *(empty)* | Validation was not attempted (rule has no `validate` field) |
-
-##### CLI Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--experiments=validation` | — | **Required.** Opt in to the validation feature |
-| `--validation` | `true` | Master toggle — set `--validation=false` to skip all validation |
-| `--validation-status` | *(all)* | Comma-separated list of statuses to include in output: `valid`, `invalid`, `revoked`, `error`, `unknown`, `none`. Use `none` to include findings from rules without a `validate` field. |
-| `--validation-timeout` | `10s` | Per-request HTTP timeout |
-| `--validation-workers` | `10` | Number of concurrent validation workers |
-| `--validation-debug` | `false` | Attach raw HTTP request/response to finding metadata |
-| `--validation-extract-empty` | `false` | Include empty/nil metadata values in output |
-
-```bash
-# Only show valid findings (excludes non-validatable rules)
-betterleaks git --experiments=validation --validation-status valid
-
-# Show valid findings + all non-validatable rules
-betterleaks git --experiments=validation --validation-status valid,none
-
-# Show valid and revoked
-betterleaks dir --experiments=validation --validation-status valid,revoked
-
-# Disable validation entirely
-betterleaks git --validation=false
-
-# Debug: see the raw HTTP request and response in output
-betterleaks dir --experiments=validation --validation-debug
-```
 
 #### betterleaks:allow / gitleaks:allow
 

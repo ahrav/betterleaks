@@ -75,9 +75,9 @@ var celExpressions = []struct {
 		`cel.bind(r,
   http.get("https://api.cursor.com/v0/me", {
     "Accept": "application/json",
-    "Authorization": "Basic " + secret
+    "Authorization": "Basic " + base64.encode(bytes(secret))
   }),
-  r.status == 200 ? {
+  r.status == 200 && r.body.contains('"userEmail"') ? {
     "result": "valid"
   } : r.status in [401, 403] ? {
     "result": "invalid",
@@ -191,26 +191,28 @@ var celExpressions = []struct {
 )`,
 	},
 	{
-		"mailchimp",
-		`cel.bind(r,
-  http.get("https://us1.api.mailchimp.com/3.0/ping", {
-    "Accept": "application/json",
-    "Authorization": "Bearer " + secret
-  }),
-  r.status == 200 ? {
-    "result": "valid"
-  } : r.status in [401, 403] ? {
-    "result": "invalid",
-    "reason": "Unauthorized"
-  } : unknown(r)
+		"mailchimp-api-key",
+		`cel.bind(dc, secret.substring(secret.lastIndexOf("-") + 1),
+  cel.bind(r,
+    http.get("https://" + dc + ".api.mailchimp.com/3.0/ping", {
+      "Accept": "application/json",
+      "Authorization": "Basic " + base64.encode(bytes("x:" + secret))
+    }),
+    r.status == 200 ? {
+      "result": "valid"
+    } : r.status in [401, 403] ? {
+      "result": "invalid",
+      "reason": "Unauthorized"
+    } : unknown(r)
+  )
 )`,
 	},
 	{
-		"mailgun",
+		"mailgun-private-api-token",
 		`cel.bind(r,
   http.get("https://api.mailgun.net/v3/domains", {
     "Accept": "application/json",
-    "Authorization": "Basic " + secret
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret))
   }),
   r.status == 200 ? {
     "result": "valid"

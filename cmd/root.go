@@ -565,78 +565,23 @@ func bytesConvert(bytes uint64) string {
 	return fmt.Sprintf("%s %s", stringValue, unit)
 }
 
-// filterByStatus filters findings to those whose ValidationStatus matches one
-// of the comma-separated status names. Status names are case-insensitive.
-// The pseudo-status "none" matches findings from rules that have no validation
-// block (ValidationStatus == ""). Without "none", such findings are excluded
-// when any filter is active.
-func filterByStatus(findings []report.Finding, statusList string) []report.Finding {
-	allowed := make(map[string]struct{})
-	includeNone := false
-	for s := range strings.SplitSeq(statusList, ",") {
-		s = strings.TrimSpace(strings.ToLower(s))
-		if s == "" {
-			continue
-		}
-		if s == "none" {
-			includeNone = true
-			continue
-		}
-		allowed[s] = struct{}{}
-	}
-	if len(allowed) == 0 && !includeNone {
-		return findings
-	}
-	var filtered []report.Finding
-	for _, f := range findings {
-		if f.ValidationStatus == "" {
-			if includeNone {
-				filtered = append(filtered, f)
-			}
-			continue
-		}
-		if _, ok := allowed[f.ValidationStatus]; ok {
-			filtered = append(filtered, f)
-		}
-	}
-	return filtered
-}
-
 func findingSummaryAndExit(detector *detect.Detector, findings []report.Finding, exitCode int, start time.Time, err error) {
 	if diagnosticsManager.Enabled {
 		logging.Debug().Msg("Finalizing diagnostics...")
 		diagnosticsManager.StopDiagnostics()
 	}
 
-	var validCount, invalidCount, revokedCount, unknownCount, errorCount int
-	for _, f := range findings {
-		switch f.ValidationStatus {
-		case "valid":
-			validCount++
-		case "invalid":
-			invalidCount++
-		case "revoked":
-			revokedCount++
-		case "unknown":
-			unknownCount++
-		case "error":
-			errorCount++
-		}
-	}
-	if validCount+invalidCount+revokedCount+unknownCount+errorCount > 0 {
+	if detector.ValidationPool != nil {
 		logging.Info().
-			Int("valid", validCount).
-			Int("invalid", invalidCount).
-			Int("revoked", revokedCount).
-			Int("unknown", unknownCount).
-			Int("errors", errorCount).
+			Int("valid", detector.ValidationCounts["valid"]).
+			Int("invalid", detector.ValidationCounts["invalid"]).
+			Int("revoked", detector.ValidationCounts["revoked"]).
+			Int("unknown", detector.ValidationCounts["unknown"]).
+			Int("errors", detector.ValidationCounts["error"]).
 			Msg("validation complete")
 	}
 
-	outputStatus, _ := rootCmd.Flags().GetString("validation-status")
-	if outputStatus != "" {
-		findings = filterByStatus(findings, outputStatus)
-	}
+	findings = detector.FilterByStatus(findings)
 
 	totalBytes := detector.TotalBytes.Load()
 	bytesMsg := fmt.Sprintf("scanned ~%d bytes (%s)", totalBytes, bytesConvert(totalBytes))

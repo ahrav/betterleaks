@@ -140,6 +140,11 @@ type Detector struct {
 	// ValidationPool is the CEL validation worker pool.
 	ValidationPool *validate.Pool
 
+	// ValidationCounts tracks how many findings were returned for each
+	// ValidationStatus value. Populated by the DetectSource consumer goroutine;
+	// safe to read after DetectSource returns.
+	ValidationCounts map[string]int
+
 	// ValidationExtractEmpty controls whether empty values from extractors
 	// are included in validation output.
 	ValidationExtractEmpty bool
@@ -205,14 +210,15 @@ func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
 	}
 
 	return &Detector{
-		commitMap:      make(map[string]bool),
-		gitleaksIgnore: make(map[string]struct{}),
-		commitMutex:    &sync.Mutex{},
-		findings:       make([]report.Finding, 0),
-		Config:         cfg,
-		prefilter:      *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
-		Sema:           semgroup.NewGroup(ctx, 40),
-		tokenizer:      tke,
+		commitMap:        make(map[string]bool),
+		gitleaksIgnore:   make(map[string]struct{}),
+		commitMutex:      &sync.Mutex{},
+		findings:         make([]report.Finding, 0),
+		ValidationCounts: make(map[string]int),
+		Config:           cfg,
+		prefilter:        *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
+		Sema:             semgroup.NewGroup(ctx, 40),
+		tokenizer:        tke,
 	}
 }
 
@@ -307,6 +313,9 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 				f.ValidationMeta = stripEmptyMeta(f.ValidationMeta)
 			}
 			d.findings = append(d.findings, f)
+			if f.ValidationStatus != "" {
+				d.ValidationCounts[f.ValidationStatus]++
+			}
 			if d.shouldVerbosePrint(f) {
 				printFinding(f, d.NoColor)
 			}
@@ -988,6 +997,29 @@ func (d *Detector) shouldVerbosePrint(f report.Finding) bool {
 	}
 	_, ok := d.ValidationStatusFilter[f.ValidationStatus]
 	return ok
+}
+
+// FilterByStatus returns findings whose ValidationStatus is in
+// d.ValidationStatusFilter. If the filter is empty, all findings are returned.
+// The pseudo-status "none" matches findings with no ValidationStatus set.
+func (d *Detector) FilterByStatus(findings []report.Finding) []report.Finding {
+	if len(d.ValidationStatusFilter) == 0 {
+		return findings
+	}
+	_, includeNone := d.ValidationStatusFilter["none"]
+	var filtered []report.Finding
+	for _, f := range findings {
+		if f.ValidationStatus == "" {
+			if includeNone {
+				filtered = append(filtered, f)
+			}
+			continue
+		}
+		if _, ok := d.ValidationStatusFilter[f.ValidationStatus]; ok {
+			filtered = append(filtered, f)
+		}
+	}
+	return filtered
 }
 
 // AddCommit synchronously adds a commit to the commit slice

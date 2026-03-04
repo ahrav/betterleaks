@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -10,12 +11,11 @@ import (
 	"github.com/google/cel-go/cel"
 )
 
-// ValidationResult pairs a finding's fingerprint with its validation outcome.
+// ValidationResult holds the outcome of a single CEL validation attempt.
 type ValidationResult struct {
-	Fingerprint string
-	Status      string
-	Reason      string
-	Meta        map[string]any
+	Status string
+	Reason string
+	Meta   map[string]any
 }
 
 // validationJob is the internal unit of work for the pool.
@@ -125,8 +125,7 @@ func (p *Pool) worker() {
 	defer p.wg.Done()
 	for job := range p.jobs {
 		vr := ValidationResult{
-			Fingerprint: job.finding.Fingerprint,
-			Meta:        map[string]any{},
+			Meta: map[string]any{},
 		}
 
 		prg, ok := job.program.(cel.Program)
@@ -143,12 +142,8 @@ func (p *Pool) worker() {
 			merged := job.captures
 			if len(job.required) > 0 {
 				merged = make(map[string]string, len(job.captures)+len(job.required))
-				for k, v := range job.captures {
-					merged[k] = v
-				}
-				for k, v := range job.required {
-					merged[k] = v
-				}
+				maps.Copy(merged, job.captures)
+				maps.Copy(merged, job.required)
 			}
 			result, err := p.cache.GetOrDo(cacheKey, func() (*Result, error) {
 				return p.env.Eval(prg, job.finding.Secret, merged)

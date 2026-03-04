@@ -107,7 +107,7 @@ func (e encodingKind) String() string {
 func (e encodingKind) kinds() []encodingKind {
 	kinds := []encodingKind{}
 
-	for i := 0; i < len(encodingNames); i++ {
+	for i := range encodingNames {
 		if kind := int(e) & int(math.Pow(2, float64(i))); kind != 0 {
 			kinds = append(kinds, encodingKind(kind))
 		}

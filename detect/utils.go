@@ -181,10 +181,10 @@ func formatMatchContext(context string, match string, secret string, noColor boo
 			if secretIdx := strings.Index(line, secret); secret != "" && secretIdx != -1 {
 				// Try to highlight the full match with the secret emphasized inside it
 				if matchIdx := strings.Index(line, match); match != "" && matchIdx != -1 {
-					secretInMatch := strings.Index(match, secret)
-					highlighted := matchStyle.Render(match[:secretInMatch]) +
+					before, after, _ := strings.Cut(match, secret)
+					highlighted := matchStyle.Render(before) +
 						secretStyle.Render(secret) +
-						matchStyle.Render(match[secretInMatch+len(secret):])
+						matchStyle.Render(after)
 					line = line[:matchIdx] + highlighted + line[matchIdx+len(match):]
 				} else {
 					// Fall back to highlighting just the secret

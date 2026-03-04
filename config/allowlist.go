@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"slices"
 	"strings"
 
 	ahocorasick "github.com/BobuSumisu/aho-corasick"
@@ -123,10 +124,8 @@ func (a *Allowlist) CommitAllowed(c string) (bool, string) {
 			return true, ""
 		}
 	} else if len(a.Commits) > 0 {
-		for _, commit := range a.Commits {
-			if commit == c {
-				return true, c
-			}
+		if slices.Contains(a.Commits, c) {
+			return true, c
 		}
 	}
 	return false, ""

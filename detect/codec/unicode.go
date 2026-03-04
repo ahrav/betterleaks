@@ -15,7 +15,7 @@ func parseHex4(s string, offset int) (rune, bool) {
 		return 0, false
 	}
 	var val rune
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		n := hexMap[s[offset+i]]
 		if n == '\xff' {
 			return 0, false

@@ -529,7 +529,7 @@ func setupValidation(cmd *cobra.Command, cfg config.Config, detector *detect.Det
 	statusFilter, _ := cmd.Flags().GetString("validation-status")
 	if statusFilter != "" {
 		detector.ValidationStatusFilter = make(map[string]struct{})
-		for _, s := range strings.Split(statusFilter, ",") {
+		for s := range strings.SplitSeq(statusFilter, ",") {
 			s = strings.TrimSpace(s)
 			if s != "" {
 				detector.ValidationStatusFilter[s] = struct{}{}
@@ -570,10 +570,10 @@ func bytesConvert(bytes uint64) string {
 // The pseudo-status "none" matches findings from rules that have no validation
 // block (ValidationStatus == ""). Without "none", such findings are excluded
 // when any filter is active.
-func filterByStatus(findings []report.Finding, statusCSV string) []report.Finding {
+func filterByStatus(findings []report.Finding, statusList string) []report.Finding {
 	allowed := make(map[string]struct{})
 	includeNone := false
-	for _, s := range strings.Split(statusCSV, ",") {
+	for s := range strings.SplitSeq(statusList, ",") {
 		s = strings.TrimSpace(strings.ToLower(s))
 		if s == "" {
 			continue

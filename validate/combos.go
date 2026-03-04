@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"maps"
 	"sort"
 
 	"github.com/betterleaks/betterleaks/logging"
@@ -47,9 +48,7 @@ func cartesian(ids []string, secrets map[string][]string) []map[string]string {
 	for _, val := range secrets[head] {
 		for _, m := range rest {
 			combo := make(map[string]string, len(m)+1)
-			for k, v := range m {
-				combo[k] = v
-			}
+			maps.Copy(combo, m)
 			combo[head] = val
 			result = append(result, combo)
 		}

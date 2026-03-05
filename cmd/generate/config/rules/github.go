@@ -7,30 +7,21 @@ import (
 	"github.com/betterleaks/betterleaks/regexp"
 )
 
-func githubTokenValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    "https://api.github.com/user",
-		Headers: map[string]string{
-			"Authorization": "token {{ secret }}",
-			"Accept":        "application/vnd.github+json",
-		},
-		Extract: map[string]string{
-			"username": "json:login",
-			"name":     "json:name",
-			"scopes":   "header:X-OAuth-Scopes",
-		},
-		Match: []config.MatchClause{
-			{
-				StatusCodes: []int{200},
-				JSON:        map[string]any{"login": "!empty", "id": "!empty"},
-				Result:      "valid",
-			},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
+const githubTokenCEL = `cel.bind(r,
+  http.get("https://api.github.com/user", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "token " + secret
+  }),
+  r.status == 200 && r.json.?login.orValue("") != "" ? {
+    "result": "valid",
+    "username": r.json.?login.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`
 
 var githubAllowlist = []*config.Allowlist{
 	{
@@ -50,7 +41,7 @@ func GitHubPat() *config.Rule {
 		Entropy:     3,
 		Keywords:    []string{"ghp_"},
 		Allowlists:  githubAllowlist,
-		Validation:  githubTokenValidation(),
+		ValidateCEL: githubTokenCEL,
 	}
 
 	// validate
@@ -69,7 +60,7 @@ func GitHubFineGrainedPat() *config.Rule {
 		Regex:       regexp.MustCompile(`github_pat_\w{82}`),
 		Entropy:     3,
 		Keywords:    []string{"github_pat_"},
-		Validation:  githubTokenValidation(),
+		ValidateCEL: githubTokenCEL,
 	}
 
 	// validate
@@ -88,7 +79,7 @@ func GitHubOauth() *config.Rule {
 		Regex:       regexp.MustCompile(`gho_[0-9a-zA-Z]{36}`),
 		Entropy:     3,
 		Keywords:    []string{"gho_"},
-		Validation:  githubTokenValidation(),
+		ValidateCEL: githubTokenCEL,
 	}
 
 	// validate
@@ -99,6 +90,25 @@ func GitHubOauth() *config.Rule {
 	return utils.Validate(r, tps, fps)
 }
 
+// TODO add this later once we confirm orValue({}) is working
+// "permissions": r.json.?permissions.orValue({})
+const githubAppTokenCEL = `cel.bind(r,
+  http.get("https://api.github.com/app", {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.json.?slug.orValue("") != "" ? {
+    "result": "valid",
+    "slug": r.json.?slug.orValue(""),
+    "name": r.json.?name.orValue(""),
+    "html_url": r.json.?html_url.orValue(""),
+	"external_url": r.json.?external_url.orValue("")
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`
+
 func GitHubApp() *config.Rule {
 	// define rule
 	r := config.Rule{
@@ -108,7 +118,7 @@ func GitHubApp() *config.Rule {
 		Entropy:     3,
 		Keywords:    []string{"ghu_", "ghs_"},
 		Allowlists:  githubAllowlist,
-		Validation:  githubTokenValidation(),
+		ValidateCEL: githubAppTokenCEL,
 	}
 
 	// validate
@@ -129,7 +139,7 @@ func GitHubRefresh() *config.Rule {
 		Regex:       regexp.MustCompile(`ghr_[0-9a-zA-Z]{36}`),
 		Entropy:     3,
 		Keywords:    []string{"ghr_"},
-		Validation:  githubTokenValidation(),
+		ValidateCEL: githubTokenCEL,
 	}
 
 	// validate

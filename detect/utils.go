@@ -181,10 +181,10 @@ func formatMatchContext(context string, match string, secret string, noColor boo
 			if secretIdx := strings.Index(line, secret); secret != "" && secretIdx != -1 {
 				// Try to highlight the full match with the secret emphasized inside it
 				if matchIdx := strings.Index(line, match); match != "" && matchIdx != -1 {
-					secretInMatch := strings.Index(match, secret)
-					highlighted := matchStyle.Render(match[:secretInMatch]) +
+					before, after, _ := strings.Cut(match, secret)
+					highlighted := matchStyle.Render(before) +
 						secretStyle.Render(secret) +
-						matchStyle.Render(match[secretInMatch+len(secret):])
+						matchStyle.Render(after)
 					line = line[:matchIdx] + highlighted + line[matchIdx+len(match):]
 				} else {
 					// Fall back to highlighting just the secret
@@ -315,15 +315,15 @@ func printValidation(f report.Finding, noColor bool) {
 	var statusStyle lipgloss.Style
 	if !noColor {
 		switch f.ValidationStatus {
-		case report.ValidationValid:
+		case "valid":
 			statusStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00d26a"))
-		case report.ValidationInvalid:
+		case "invalid":
 			statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
-		case report.ValidationRevoked:
+		case "revoked":
 			statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5d445"))
-		case report.ValidationUnknown:
+		case "unknown":
 			statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c0c0c0"))
-		case report.ValidationError:
+		case "error":
 			statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f05c07"))
 		default:
 			statusStyle = lipgloss.NewStyle()
@@ -332,23 +332,43 @@ func printValidation(f report.Finding, noColor bool) {
 		statusStyle = lipgloss.NewStyle()
 	}
 
-	fmt.Printf("%-12s %s", "Validation:", statusStyle.Render(string(f.ValidationStatus)))
-	if f.ValidationNote != "" {
-		fmt.Printf("  (%s)", f.ValidationNote)
+	fmt.Printf("%-12s %s", "Validation:", statusStyle.Render(strings.ToUpper(f.ValidationStatus)))
+	if f.ValidationReason != "" {
+		fmt.Printf("  (%s)", f.ValidationReason)
 	}
 	fmt.Println()
 
-	for _, k := range sortedKeys(f.ValidationMeta) {
-		fmt.Printf("%-12s %s = %s\n", "", k, f.ValidationMeta[k])
-	}
-	if f.ValidationResponse != "" {
-		fmt.Printf("%-12s %s\n", "", "Full response:")
-		fmt.Printf("%s\n", f.ValidationResponse)
+	var metaStyle lipgloss.Style
+	if !noColor {
+		metaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ca3af"))
+	} else {
+		metaStyle = lipgloss.NewStyle()
 	}
 
+	for _, k := range sortedMapKeys(f.ValidationMeta) {
+		fmt.Printf("  %s\n", metaStyle.Render(fmt.Sprintf("%-10s %v", k+" =", f.ValidationMeta[k])))
+	}
 }
 
-func sortedKeys(m map[string]string) []string {
+// stripEmptyMeta removes keys whose value is an empty string or nil.
+func stripEmptyMeta(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if s, ok := v.(string); ok && s == "" {
+			continue
+		}
+		if v == nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func sortedMapKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

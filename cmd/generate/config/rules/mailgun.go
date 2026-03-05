@@ -6,22 +6,6 @@ import (
 	"github.com/betterleaks/betterleaks/config"
 )
 
-func mailgunPrivateValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    "https://api.mailgun.net/v3/domains",
-		Headers: map[string]string{
-			"Accept":        "application/json",
-			"Authorization": `Basic {{ "api:" | append: secret | b64enc }}`,
-		},
-		Match: []config.MatchClause{
-			{StatusCodes: []int{200}, Result: "valid"},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
-
 func MailGunPrivateAPIToken() *config.Rule {
 	// define rule
 	r := config.Rule{
@@ -32,7 +16,18 @@ func MailGunPrivateAPIToken() *config.Rule {
 		Keywords: []string{
 			"mailgun",
 		},
-		Validation: mailgunPrivateValidation(),
+		ValidateCEL: `cel.bind(r,
+  http.get("https://api.mailgun.net/v3/domains", {
+    "Accept": "application/json",
+    "Authorization": "Basic " + base64.encode(bytes("api:" + secret))
+  }),
+  r.status == 200 ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	// validate

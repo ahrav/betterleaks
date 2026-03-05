@@ -66,7 +66,7 @@ type ViperConfig struct {
 
 		Allowlists      []*viperRuleAllowlist
 		Required        []*viperRequired
-		Validate        *viperValidation
+		Validate        string
 		SkipReport      bool
 		TokenEfficiency bool
 	}
@@ -86,27 +86,6 @@ type viperRequired struct {
 	ID            string
 	WithinLines   *int `mapstructure:"withinLines"`
 	WithinColumns *int `mapstructure:"withinColumns"`
-}
-
-type viperValidation struct {
-	Type    string             `mapstructure:"type"`
-	Method  string             `mapstructure:"method"`
-	URL     string             `mapstructure:"url"`
-	Headers map[string]string  `mapstructure:"headers"`
-	Body    string             `mapstructure:"body"`
-	Match   []viperMatchClause `mapstructure:"match"`
-	Extract map[string]string  `mapstructure:"extract"`
-}
-
-type viperMatchClause struct {
-	Status        any               `mapstructure:"status"` // int, float64, or []any — single or list
-	Words         []string          `mapstructure:"words"`
-	WordsAll      bool              `mapstructure:"words_all"`
-	NegativeWords []string          `mapstructure:"negative_words"`
-	JSON          map[string]any    `mapstructure:"json"`
-	Headers       map[string]string `mapstructure:"headers"`
-	Result        string            `mapstructure:"result"`
-	Extract       map[string]string `mapstructure:"extract"`
 }
 
 type viperRuleAllowlist struct {
@@ -236,13 +215,7 @@ func (vc *ViperConfig) Translate() (Config, error) {
 			cr.RequiredRules = append(cr.RequiredRules, &requiredRule)
 		}
 
-		if vr.Validate != nil {
-			v, err := parseViperValidation(vr.Validate)
-			if err != nil {
-				return Config{}, fmt.Errorf("%s: %w", cr.RuleID, err)
-			}
-			cr.Validation = v
-		}
+		cr.ValidateCEL = vr.Validate
 
 		orderedRules = append(orderedRules, cr.RuleID)
 		rulesMap[cr.RuleID] = cr
@@ -327,7 +300,7 @@ func (vc *ViperConfig) Translate() (Config, error) {
 	// Validate the rules after everything has been assembled (including extended configs).
 	if currentExtendDepth == 0 {
 		for _, rule := range c.Rules {
-			if err := rule.CheckForMisconfiguration(); err != nil {
+			if err := rule.Validate(); err != nil {
 				return Config{}, err
 			}
 		}
@@ -587,8 +560,8 @@ func (c *Config) extend(extensionConfig Config) {
 			if currentRule.Path != nil {
 				baseRule.Path = currentRule.Path
 			}
-			if currentRule.Validation != nil {
-				baseRule.Validation = currentRule.Validation
+			if currentRule.ValidateCEL != "" {
+				baseRule.ValidateCEL = currentRule.ValidateCEL
 			}
 			baseRule.Tags = append(baseRule.Tags, currentRule.Tags...)
 			baseRule.Keywords = append(baseRule.Keywords, currentRule.Keywords...)
@@ -609,87 +582,4 @@ func (c *Config) extend(extensionConfig Config) {
 	return
 }
 
-func parseViperValidation(vv *viperValidation) (*Validation, error) {
-	vType := strings.ToLower(vv.Type)
-	if vType == "" {
-		vType = "http"
-	}
 
-	switch vType {
-	case "http":
-		return parseHTTPValidation(vv)
-	default:
-		return nil, fmt.Errorf("validate: unknown type %q", vv.Type)
-	}
-}
-
-func parseHTTPValidation(vv *viperValidation) (*Validation, error) {
-	var clauses []MatchClause
-	for i, vm := range vv.Match {
-		statusCodes, err := parseStatusCodes(vm.Status)
-		if err != nil {
-			return nil, fmt.Errorf("validate: match[%d]: %w", i, err)
-		}
-		clause := MatchClause{
-			StatusCodes:   statusCodes,
-			Words:         vm.Words,
-			WordsAll:      vm.WordsAll,
-			NegativeWords: vm.NegativeWords,
-			JSON:          vm.JSON,
-			Headers:       vm.Headers,
-			Result:        strings.ToLower(vm.Result),
-			Extract:       vm.Extract,
-		}
-		if clause.Result == "" {
-			return nil, fmt.Errorf("validate: match[%d]: result is required", i)
-		}
-		clauses = append(clauses, clause)
-	}
-
-	v := &Validation{
-		Type:    ValidationTypeHTTP,
-		Method:  strings.ToUpper(vv.Method),
-		URL:     vv.URL,
-		Headers: vv.Headers,
-		Body:    vv.Body,
-		Match:   clauses,
-		Extract: vv.Extract,
-	}
-	if err := v.Check(); err != nil {
-		return nil, err
-	}
-	return v, nil
-}
-
-// parseStatusCodes converts the flexible TOML status field (int, float64, or
-// list) into a []int for MatchClause.StatusCodes.
-func parseStatusCodes(raw any) ([]int, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	switch v := raw.(type) {
-	case int:
-		return []int{v}, nil
-	case int64:
-		return []int{int(v)}, nil
-	case float64:
-		return []int{int(v)}, nil
-	case []any:
-		codes := make([]int, 0, len(v))
-		for _, item := range v {
-			switch n := item.(type) {
-			case int:
-				codes = append(codes, n)
-			case int64:
-				codes = append(codes, int(n))
-			case float64:
-				codes = append(codes, int(n))
-			default:
-				return nil, fmt.Errorf("status list contains non-numeric value: %v", item)
-			}
-		}
-		return codes, nil
-	default:
-		return nil, fmt.Errorf("status must be an int or list of ints, got %T", raw)
-	}
-}

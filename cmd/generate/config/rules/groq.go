@@ -6,21 +6,6 @@ import (
 	"github.com/betterleaks/betterleaks/config"
 )
 
-func groqValidation() *config.Validation {
-	return &config.Validation{
-		Type:   config.ValidationTypeHTTP,
-		Method: "GET",
-		URL:    "https://api.groq.com/openai/v1/models",
-		Headers: map[string]string{
-			"Authorization": "Bearer {{ secret }}",
-		},
-		Match: []config.MatchClause{
-			{StatusCodes: []int{200}, Words: []string{`"id"`, `"data"`}, WordsAll: true, Result: "valid"},
-			{StatusCodes: []int{401, 403}, Result: "invalid"},
-		},
-	}
-}
-
 func Groq() *config.Rule {
 	r := config.Rule{
 		RuleID:      "groq-api-key",
@@ -28,7 +13,17 @@ func Groq() *config.Rule {
 		Regex:       utils.GenerateUniqueTokenRegex(`gsk_[A-Z0-9]{52}`, true),
 		Keywords:    []string{"gsk_"},
 		Entropy:     3.5,
-		Validation:  groqValidation(),
+		ValidateCEL: `cel.bind(r,
+  http.get("https://api.groq.com/openai/v1/models", {
+    "Authorization": "Bearer " + secret
+  }),
+  r.status == 200 && r.body.contains('"id"') && r.body.contains('"data"') ? {
+    "result": "valid"
+  } : r.status in [401, 403] ? {
+    "result": "invalid",
+    "reason": "Unauthorized"
+  } : unknown(r)
+)`,
 	}
 
 	tps := utils.GenerateSampleSecrets("groq", "gsk_"+secrets.NewSecret(`[A-Z0-9]{52}`))

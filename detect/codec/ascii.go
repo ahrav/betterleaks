@@ -3,7 +3,7 @@ package codec
 var printableASCII [256]bool
 
 func init() {
-	for b := 0; b < len(printableASCII); b++ {
+	for b := range len(printableASCII) {
 		if '\x08' < b && b < '\x7f' {
 			printableASCII[b] = true
 		}

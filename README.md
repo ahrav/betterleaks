@@ -52,7 +52,7 @@ Great question. Check out what we're cookin in the [v2 branch](https://github.co
 ```
 # Package managers
 brew install betterleaks
-brew install betterleaks/tap/betterleaks 
+brew install betterleaks/tap/betterleaks
 
 # Containers
 docker pull ghcr.io/betterleaks/betterleaks:latest
@@ -307,30 +307,6 @@ id = "gitlab-pat"
     regexTarget = "line"
     regexes = [ '''MY-glpat-''' ]
 
-# Optional: validate whether a detected secret is live by firing an HTTP request.
-# The implicit {{ secret }} variable always contains the captured secret.
-# Named capture groups and Liquid filters are also supported.
-[[rules]]
-id = "awesome-rule-1-validated"
-description = "awesome rule 1 but validated"
-regex = '''awesome-secret-([a-zA-Z0-9]{32})'''
-keywords = ["awesome-secret-"]
-
-    [rules.validate]
-    type = "http"
-    method = "GET"
-    url = "https://api.example.com/v1/verify"
-    headers = { Authorization = "Token {{ secret }}" }
-    extract = { user = "json:user.email", scopes = "header:X-OAuth-Scopes" }
-
-    # match is a first-match-wins list; the first clause whose conditions all
-    # pass determines the finding status.
-    match = [
-        { status = 200, json = { active = true }, result = "valid" },
-        { status = 401, result = "invalid" },
-    ]
-
-
 # Global allowlists have a higher order of precedence than rule-specific allowlists.
 # If a commit listed in the `commits` field below is encountered then that commit will be skipped and no
 # secrets will be detected for said commit. The same logic applies for regexes and paths.
@@ -366,9 +342,63 @@ paths = ['''tests/expected/._\.json$''']
 
 Refer to the default [betterleaks config](https://github.com/betterleaks/betterleaks/blob/master/config/betterleaks.toml) for examples or follow the [contributing guidelines](https://github.com/betterleaks/betterleaks/blob/master/CONTRIBUTING.md) if you would like to contribute to the default configuration.
 
-### Additional Configuration
+## Additional Configuration
 
-#### Composite Rules (Multi-part or `required` Rules)
+## Secrets Validation
+**⚠️ Secrets Validation is an experimental feature. To enable it, pass --experiments=validation.**
+
+Betterleaks can automatically verify if a detected secret is live by making an HTTP request defined in the rule's validate field. Validation runs asynchronously, and responses are cached in-memory so duplicate secrets only trigger a single network request.
+
+### CEL Expressions
+Rules use [CEL (Common Expression Language)](https://cel.dev/) for validation logic. The expression receives the captured secret, fires an HTTP request (more validation kinds to come), and returns a status map.
+
+### Variables & Functions:
+
+- `secret` (string): The captured secret value.
+- `captures` (map): Named capture groups from the rule's regex.
+- `http.get(url, headers)` / `http.post(url, headers, body)`: Fires the HTTP request.
+- `cel.bind(name, value, expr)`: Binds a variable to avoid repeating sub-expressions.
+- `unknown(response)`: Helper returning `{"result": "unknown", "reason": "HTTP <status>"}`.
+
+### The Response Object (r):
+- `r.status` (int): HTTP status code.
+- `r.body` (string): Raw response body.
+- `r.json` (dyn): Parsed JSON body.
+- `r.headers` (map): Response headers (all keys lowercased).
+
+### Result Format
+Expressions should return a map with a `"result"` key set to `valid`, `invalid`, `revoked`, `unknown`, or `error`. Any additional keys in the map are attached to the finding as metadata. 
+
+Example
+Here is a standard validation block for a GitHub Personal Access Token. It uses CEL's optional chaining (.? and .orValue()) to safely extract metadata from the JSON response:
+
+```TOML
+[[rules]]
+id = "github-pat"
+regex = '''ghp_[0-9a-zA-Z]{36}'''
+keywords = ["ghp_"]
+validate = '''
+  cel.bind(r,
+    http.get("https://api.github.com/user", {
+      "Accept": "application/vnd.github+json",
+      "Authorization": "token " + secret
+    }),
+    r.status == 200 ? {
+      "result": "valid",
+      "username": r.json.?login.orValue(""),
+      "name": r.json.?name.orValue(""),
+      "scopes": r.headers[?"x-oauth-scopes"].orValue("")
+    } : r.status in [401, 403] ? {
+      "result": "invalid",
+      "reason": "Unauthorized"
+    } : unknown(r)
+  )
+'''
+```
+Note: For more complex validation setups—such as dynamically constructing URLs, using Basic Auth, or validating multi-part composite rules ([[rules.required]])—check out the existing examples in our built-in rules directory.
+
+
+## Composite Rules (Multi-part or `required` Rules)
 Betterleaks ships with composite rules, which are made up of a single "primary" rule and one or more auxiliary or `required` rules. To create a composite rule, add a `[[rules.required]]` table to the primary rule specifying an `id` and optionally `withinLines` and/or `withinColumns` proximity constraints. A fragment is a chunk of content that Betterleaks processes at once (typically a file, part of a file, or git diff), and proximity matching instructs the primary rule to only report a finding if the auxiliary `required` rules also find matches within the specified area of the fragment.
 
 **Proximity matching:** Using the `withinLines` and `withinColumns` fields instructs the primary rule to only report a finding if the auxiliary `required` rules also find matches within the specified proximity. You can set:
@@ -378,244 +408,8 @@ Betterleaks ships with composite rules, which are made up of a single "primary" 
 - **Both** - creates a rectangular search area (both constraints must be satisfied)
 - **Neither** - fragment-level matching (required findings can be anywhere in the same fragment)
 
-Here are diagrams illustrating each proximity behavior:
 
-```
-p = primary captured secret
-a = auxiliary (required) captured secret
-fragment = section of data gitleaks is looking at
-
-
-    *Fragment-level proximity*
-    Any required finding in the fragment
-          ┌────────┐
-   ┌──────┤fragment├─────┐
-   │      └──────┬─┤     │ ┌───────┐
-   │             │a│◀────┼─│✓ MATCH│
-   │          ┌─┐└─┘     │ └───────┘
-   │┌─┐       │p│        │
-   ││a│    ┌─┐└─┘        │ ┌───────┐
-   │└─┘    │a│◀──────────┼─│✓ MATCH│
-   └─▲─────┴─┴───────────┘ └───────┘
-     │    ┌───────┐
-     └────│✓ MATCH│
-          └───────┘
-
-
-   *Column bounded proximity*
-   `withinColumns = 3`
-          ┌────────┐
-   ┌────┬─┤fragment├─┬───┐
-   │      └──────┬─┤     │ ┌───────────┐
-   │    │        │a│◀┼───┼─│+1C ✓ MATCH│
-   │          ┌─┐└─┘     │ └───────────┘
-   │┌─┐ │     │p│    │   │
-┌──▶│a│  ┌─┐  └─┘        │ ┌───────────┐
-│  │└─┘ ││a│◀────────┼───┼─│-2C ✓ MATCH│
-│  │       ┘             │ └───────────┘
-│  └── -3C ───0C─── +3C ─┘
-│  ┌─────────┐
-│  │ -4C ✗ NO│
-└──│  MATCH  │
-   └─────────┘
-
-
-   *Line bounded proximity*
-   `withinLines = 4`
-         ┌────────┐
-   ┌─────┤fragment├─────┐
-  +4L─ ─ ┴────────┘─ ─ ─│
-   │                    │
-   │              ┌─┐   │ ┌────────────┐
-   │         ┌─┐  │a│◀──┼─│+1L ✓ MATCH │
-   0L  ┌─┐   │p│  └─┘   │ ├────────────┤
-   │   │a│◀──┴─┴────────┼─│-1L ✓ MATCH │
-   │   └─┘              │ └────────────┘
-   │                    │ ┌─────────┐
-  -4L─ ─ ─ ─ ─ ─ ─ ─┌─┐─│ │-5L ✗ NO │
-   │                │a│◀┼─│  MATCH  │
-   └────────────────┴─┴─┘ └─────────┘
-
-
-   *Line and column bounded proximity*
-   `withinLines = 4`
-   `withinColumns = 3`
-         ┌────────┐
-   ┌─────┤fragment├─────┐
-  +4L   ┌└────────┴ ┐   │
-   │            ┌─┐     │ ┌───────────────┐
-   │    │       │a│◀┼───┼─│+2L/+1C ✓ MATCH│
-   │         ┌─┐└─┘     │ └───────────────┘
-   0L   │    │p│    │   │
-   │         └─┘        │
-   │    │           │   │ ┌────────────┐
-  -4L    ─ ─ ─ ─ ─ ─┌─┐ │ │-5L/+3C ✗ NO│
-   │                │a│◀┼─│   MATCH    │
-   └───-3C────0L───+3C┴─┘ └────────────┘
-```
-
-
-#### Secrets Validation
-⚠️ **Secrets Validation is an experimental feature and likely to change. Feel free to use play with it and tweak your configs but don't be sad when we change it... because we are exploring _new_ and _cool_ ideas.** To enable the validation feature you must set the experimental flag w/ `--experiments=validation`
-⚠️
-
-
-Betterleaks can automatically check whether a detected secret is live by firing an HTTP request defined in a `[rules.validate]` block. Validation runs asynchronously during the scan with a pool of 10 workers.
-
-Each `[rules.validate]` block describes an HTTP request and an ordered list of **match clauses**. Clauses are evaluated top-to-bottom; the first clause whose conditions all pass determines the finding's status. This first-match-wins design lets a single rule distinguish `valid`, `revoked`, `invalid`, etc. secrets from the same API endpoint. If no clause matches, the result defaults to `unknown`.
-
-Responses are cached in-memory per scan so duplicate requests (e.g., the same API key appearing in multiple files) only hit the network once.
-
-##### Template Variables
-
-Templates use [Liquid](https://shopify.github.io/liquid/) syntax and are supported in `url`, `body`, and `headers`. The following variables are available:
-
-| Variable | Source | Example |
-|---|---|---|
-| `{{ secret }}` | The captured secret (always available) | `ghp_abc123...` |
-| `{{ capture_name }}` | Named regex capture group `(?P<capture_name>...)` | `AKIAIOSFODNN7` |
-| `{{ other-rule.capture }}` | Capture group from a required rule (composite rules) | `wJalrXUtnFEMI...` |
-
-**Liquid filters** let you transform values inline:
-
-```toml
-# Base64-encode for Basic auth
-headers = { Authorization = "Basic {{ secret | prepend: 'api:' | b64enc }}" }
-
-# URL-encode a parameter
-url = "https://api.example.com/check?key={{ secret | url_encode }}"
-
-# HMAC-sign a payload
-body = "{{ payload | hmac_sha256: secret }}"
-```
-
-Available filters: `b64enc`, `b64dec`, `url_encode`, `sha256`, `hmac_sha1`, `hmac_sha256`, `unix_timestamp`, `iso_timestamp`, `json_escape`, `uuid`, `prefix`, `suffix` (plus all [standard Liquid filters](https://shopify.github.io/liquid/filters/)).
-
-For composite rules with multiple required parts, all combinations are tested (cartesian product), and a single `valid` match is enough.
-
-##### Simple Example — GitHub PAT
-
-```toml
-[[rules]]
-id = "github-pat"
-regex = '''ghp_[0-9a-zA-Z]{36}'''
-keywords = ["ghp_"]
-
-    [rules.validate]
-    type = "http"
-    method = "GET"
-    url = "https://api.github.com/user"
-    headers = { Authorization = "token {{ secret }}", Accept = "application/vnd.github+json" }
-    extract = { username = "json:login", name = "json:name", scopes = "header:X-OAuth-Scopes" }
-
-    match = [
-        { status = 200, json = { login = "!empty", id = "!empty" }, result = "valid" },
-        { status = 401, result = "invalid" },
-        { status = 403, result = "invalid" },
-    ]
-```
-
-##### Complex Example — Slack Bot Token
-
-All responses return 200; differentiated by JSON body content:
-
-```toml
-[[rules]]
-id = "slack-bot-token"
-regex = '''(xoxb-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24})'''
-keywords = ["xoxb-"]
-
-    [rules.validate]
-    method = "POST"
-    url = "https://slack.com/api/auth.test"
-    headers = { Authorization = "Bearer {{ secret }}", Content-Type = "application/x-www-form-urlencoded" }
-    extract = { url = "json:url", user = "json:user", team = "json:team" }
-
-    match = [
-        { status = 200, json = { ok = true }, result = "valid" },
-        { status = 200, json = { ok = false, error = ["account_inactive", "token_revoked"] }, result = "revoked", extract = { error = "json:error" } },
-        { status = 200, json = { ok = false }, result = "invalid" },
-        { status = 400, result = "invalid" },
-    ]
-```
-
-
-##### Match Clauses
-
-If no clause matches, the result defaults to `UNKNOWN`. You do not need to add an explicit catch-all `{ result = "unknown" }` clause.
-
-**Match clause fields:**
-
-| Field | Type | Description |
-|---|---|---|
-| `status` | int or list of ints | Response status code must be one of these values. `status = 200` and `status = [200, 201]` are both valid. |
-| `words` | list of strings | Body must contain at least one of these strings (any match). Case-insensitive. |
-| `words_all` | bool | If `true`, body must contain **all** `words` |
-| `negative_words` | list of strings | Body must **not** contain any of these strings. Case-insensitive. |
-| `json` | inline table | GJSON path assertions that must all be satisfied. Keys are [GJSON paths](https://github.com/tidwall/gjson/blob/master/SYNTAX.md), values can be: a scalar for exact match, `"!empty"` for existence check, or a list for one-of matching (e.g. `error = ["revoked", "inactive"]`). |
-| `headers` | inline table | Response header assertions. Keys are header names (case-insensitive), values are expected substrings (case-insensitive). |
-| `result` | string | **Required.** One of: `valid`, `invalid`, `revoked`, `unknown`, `error` |
-| `extract` | inline table | Per-clause extractor override. See Extractors below. |
-
-##### Extractors
-
-Extractors pull data from the HTTP response into finding metadata. They are defined as a map of output names to source-prefixed expressions:
-
-| Prefix | Source | Example |
-|---|---|---|
-| `json:` | GJSON path on response body | `json:user.login`, `json:repos.#.name` |
-| `header:` | Response header value | `header:X-OAuth-Scopes` |
-
-Extractors can be defined at the `[rules.validate]` level (default for all clauses) or on individual match clauses (overrides the default). Array results from JSON paths are joined with commas.
-
-```toml
-[rules.validate]
-# Default extractors — used by any clause that doesn't define its own
-extract = { username = "json:login", scopes = "header:X-OAuth-Scopes" }
-
-match = [
-    { status = 200, result = "valid" },
-    # This clause overrides the default extract:
-    { status = 200, json = { ok = false }, result = "invalid", extract = { error = "json:error" } },
-]
-```
-
-##### Validation Statuses
-
-| Status | Meaning |
-|---|---|
-| `VALID` | Secret is live and active |
-| `INVALID` | Secret is not recognised — stale or never valid |
-| `REVOKED` | Secret was once valid but has been revoked |
-| `UNKNOWN` | Validation ran but could not determine status |
-| `ERROR` | Network/request error — the request itself failed |
-| *(empty)* | Validation was not attempted (no `[rules.validate]` block) |
-
-##### CLI Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--validation` | `true` | Master toggle — set `--validation=false` to skip all validation |
-| `--validation-status` | *(all)* | Comma-separated list of statuses to include in output: `valid`, `invalid`, `revoked`, `error`, `unknown`, `none`. Use `none` to include findings from rules without a validation block. |
-| `--validation-extract-empty` | `false` | Include empty/nil extracted values in output |
-| `--validation-timeout` | `10s` | Per-request HTTP timeout |
-| `--validation-full-response` | `false` | Include full HTTP response body in the finding output |
-
-```bash
-# Only show valid findings (excludes non-validatable rules)
-betterleaks git --validation-status valid
-
-# Show valid findings + all non-validatable rules
-betterleaks git --validation-status valid,none
-
-# Show valid and revoked
-betterleaks dir --validation-status valid,revoked
-
-# Disable validation entirely
-betterleaks git --validation=false
-```
-
-#### betterleaks:allow / gitleaks:allow
+## betterleaks:allow / gitleaks:allow
 
 If you are knowingly committing a test secret that betterleaks will catch you can add a `betterleaks:allow` (or `gitleaks:allow` for backwards compatibility) comment to that line which will instruct betterleaks
 to ignore that secret. Ex:
@@ -626,7 +420,7 @@ class CustomClass:
 
 ```
 
-#### .betterleaksignore / .gitleaksignore
+## .betterleaksignore / .gitleaksignore
 
 You can ignore specific findings by creating a `.betterleaksignore` (or `.gitleaksignore` for backwards compatibility) file at the root of your repo. In release v8.10.0 a `Fingerprint` value was added to the report. Each leak, or finding, has a Fingerprint that uniquely identifies a secret. Add this fingerprint to the ignore file to ignore that specific secret. See the [.gitleaksignore](https://github.com/betterleaks/betterleaks/blob/master/.betterleaksignore) for an example. Note: this feature is experimental and is subject to change in the future.
 

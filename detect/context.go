@@ -7,14 +7,8 @@ func extractContext(raw string, matchIndex []int, matchContextBytes int) string 
 		return ""
 	}
 
-	start := matchIndex[0] - matchContextBytes
-	if start < 0 {
-		start = 0
-	}
-	end := matchIndex[1] + matchContextBytes
-	if end > len(raw) {
-		end = len(raw)
-	}
+	start := max(matchIndex[0]-matchContextBytes, 0)
+	end := min(matchIndex[1]+matchContextBytes, len(raw))
 
 	return raw[start:end]
 }

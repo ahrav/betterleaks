@@ -251,6 +251,7 @@ func main() {
 		rules.PlaidAccessToken(),
 		rules.PlanetScalePassword(),
 		rules.PlanetScaleAPIToken(),
+		rules.PlanetScaleID(),
 		rules.PlanetScaleOAuthToken(),
 		rules.PostManAPI(),
 		rules.Prefect(),
@@ -333,7 +334,7 @@ func main() {
 	// ensure rules have unique ids
 	ruleLookUp := make(map[string]config.Rule, len(configRules))
 	for _, rule := range configRules {
-		if err := rule.CheckForMisconfiguration(); err != nil {
+		if err := rule.Validate(); err != nil {
 			logging.Fatal().Err(err).
 				Str("rule-id", rule.RuleID).
 				Msg("Failed to validate rule")
@@ -359,6 +360,15 @@ func main() {
 
 	funcMap := template.FuncMap{
 		"tomlQuote": tomlQuote,
+		"tomlCEL": func(s string) string {
+			// Multi-line CEL expressions use TOML multi-line literal strings.
+			// Single-line expressions use TOML literal strings (single-quoted).
+			// CEL uses " for string literals so single quotes are safe.
+			if strings.Contains(s, "\n") {
+				return "'''\n" + s + "\n'''"
+			}
+			return "'" + s + "'"
+		},
 		"tomlInlineTable": func(m map[string]string) string {
 			keys := make([]string, 0, len(m))
 			for k := range m {

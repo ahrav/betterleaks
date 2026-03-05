@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -104,7 +105,8 @@ func init() {
 	rootCmd.PersistentFlags().Bool("validation", true, "enable validation of findings against live APIs")
 	rootCmd.PersistentFlags().String("validation-status", "", "comma-separated list of validation statuses to include: valid, invalid, revoked, error, unknown, none (none = rules without validation)")
 	rootCmd.PersistentFlags().Duration("validation-timeout", 10*time.Second, "per-request timeout for validation")
-	rootCmd.PersistentFlags().Bool("validation-full-response", false, "include full HTTP response body on validated findings")
+	rootCmd.PersistentFlags().Bool("validation-debug", false, "include raw HTTP response in validation output")
+	rootCmd.PersistentFlags().Int("validation-workers", 10, "number of concurrent validation workers")
 	rootCmd.PersistentFlags().Bool("validation-extract-empty", false, "include empty values from extractors in output")
 
 	// Add diagnostics flags
@@ -343,7 +345,6 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 	if detector.Verbose, err = cmd.Flags().GetBool("verbose"); err != nil {
 		logging.Fatal().Err(err).Send()
 	}
-	detector.ValidationStatusFilter, _ = cmd.Flags().GetString("validation-status")
 	// set redact flag
 	if detector.Redact, err = cmd.Flags().GetUint("redact"); err != nil {
 		logging.Fatal().Err(err).Send()
@@ -471,9 +472,17 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 		detector.Reporter = reporter
 	}
 
+	setupValidation(cmd, cfg, detector)
+
+	return detector
+}
+
+// setupValidation reads validation flags, compiles CEL programs into cfg.Rules
+// (mutations propagate to detector.Config.Rules via shared map), creates the
+// pool, and wires status-filter settings onto the detector.
+func setupValidation(cmd *cobra.Command, cfg config.Config, detector *detect.Detector) {
 	enableValidation := mustGetBoolFlag(cmd, "validation")
 
-	// TODO move this experiment flag to the detector, basically build out the `experiments` feature.
 	experimentsStr := mustGetStringFlag(cmd, "experiments")
 	experimentsSlice := []string{}
 	if experimentsStr != "" {
@@ -484,17 +493,50 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 		enableValidation = false
 	}
 
-	// Start async validation worker pool if any rules have validate blocks.
-	if enableValidation && hasAnyValidationRule(cfg) {
-		v := validate.NewValidator(cfg)
-		v.RequestTimeout, _ = cmd.Flags().GetDuration("validation-timeout")
-		v.FullResponse, _ = cmd.Flags().GetBool("validation-full-response")
-		v.ExtractEmpty, _ = cmd.Flags().GetBool("validation-extract-empty")
-		v.IncludeRequests, _ = cmd.Flags().GetBool("validation-include-requests")
-		detector.StartValidation(cmd.Context(), v, 10)
+	if !enableValidation {
+		return
 	}
 
-	return detector
+	workers := mustGetIntFlag(cmd, "validation-workers")
+	timeout, _ := cmd.Flags().GetDuration("validation-timeout")
+	env, err := validate.NewEnvironment(&http.Client{Timeout: timeout})
+	if err != nil {
+		logging.Fatal().Err(err).Msg("failed to create CEL validation environment")
+	}
+	if mustGetBoolFlag(cmd, "validation-debug") {
+		env.DebugResponse = true
+	}
+	if mustGetBoolFlag(cmd, "validation-extract-empty") {
+		detector.ValidationExtractEmpty = true
+	}
+
+	for ruleID, rule := range cfg.Rules {
+		if rule.ValidateCEL == "" {
+			continue
+		}
+		prg, compileErr := env.Compile(rule.ValidateCEL)
+		if compileErr != nil {
+			logging.Fatal().Err(compileErr).Str("rule", ruleID).
+				Msg("failed to compile CEL validation expression")
+		}
+		rule.SetCelProgram(prg)
+		cfg.Rules[ruleID] = rule
+	}
+
+	pool := validate.NewPool(workers, env)
+	detector.ValidationPool = pool
+
+	statusFilter, _ := cmd.Flags().GetString("validation-status")
+	if statusFilter != "" {
+		detector.ValidationStatusFilter = make(map[string]struct{})
+		for s := range strings.SplitSeq(statusFilter, ",") {
+			s = strings.TrimSpace(s)
+			s = strings.ToLower(s)
+			if s != "" {
+				detector.ValidationStatusFilter[s] = struct{}{}
+			}
+		}
+	}
 }
 
 func bytesConvert(bytes uint64) string {
@@ -524,95 +566,23 @@ func bytesConvert(bytes uint64) string {
 	return fmt.Sprintf("%s %s", stringValue, unit)
 }
 
-func hasAnyValidationRule(cfg config.Config) bool {
-	for _, r := range cfg.Rules {
-		if r.Validation != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// filterByStatus filters findings to those whose ValidationStatus matches one
-// of the comma-separated status names. Status names are case-insensitive.
-// The pseudo-status "none" matches findings from rules that have no validation
-// block (ValidationStatus == ""). Without "none", such findings are excluded
-// when any filter is active.
-func filterByStatus(findings []report.Finding, statusCSV string) []report.Finding {
-	allowed := make(map[report.ValidationStatus]struct{})
-	includeNone := false
-	for _, s := range strings.Split(statusCSV, ",") {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if strings.EqualFold(s, "none") {
-			includeNone = true
-			continue
-		}
-		allowed[report.ValidationStatus(strings.ToUpper(s))] = struct{}{}
-	}
-	if len(allowed) == 0 && !includeNone {
-		return findings
-	}
-	var filtered []report.Finding
-	for _, f := range findings {
-		if f.ValidationStatus == "" {
-			if includeNone {
-				filtered = append(filtered, f)
-			}
-			continue
-		}
-		if _, ok := allowed[f.ValidationStatus]; ok {
-			filtered = append(filtered, f)
-		}
-	}
-	return filtered
-}
-
 func findingSummaryAndExit(detector *detect.Detector, findings []report.Finding, exitCode int, start time.Time, err error) {
 	if diagnosticsManager.Enabled {
 		logging.Debug().Msg("Finalizing diagnostics...")
 		diagnosticsManager.StopDiagnostics()
 	}
 
-	if detector.Validating() {
-		detector.WaitForValidation()
-		findings = detector.Findings()
-
-		var valid, invalid, revoked, unknown, errCount int
-		for _, f := range findings {
-			switch f.ValidationStatus {
-			case report.ValidationValid:
-				valid++
-			case report.ValidationInvalid:
-				invalid++
-			case report.ValidationRevoked:
-				revoked++
-			case report.ValidationUnknown:
-				unknown++
-			case report.ValidationError:
-				errCount++
-			}
-		}
+	if detector.ValidationPool != nil {
 		logging.Info().
-			Int64("attempted", detector.ValidationsAttempted()).
-			Int64("cache_hits", detector.ValidationCacheHits()).
-			Int64("http_requests", detector.ValidationHTTPRequests()).
-			Msg("validation requests")
-		logging.Info().
-			Int("valid", valid).
-			Int("invalid", invalid).
-			Int("revoked", revoked).
-			Int("unknown", unknown).
-			Int("errors", errCount).
+			Int("valid", detector.ValidationCounts["valid"]).
+			Int("invalid", detector.ValidationCounts["invalid"]).
+			Int("revoked", detector.ValidationCounts["revoked"]).
+			Int("unknown", detector.ValidationCounts["unknown"]).
+			Int("errors", detector.ValidationCounts["error"]).
 			Msg("validation complete")
 	}
 
-	outputStatus, _ := rootCmd.Flags().GetString("validation-status")
-	if outputStatus != "" {
-		findings = filterByStatus(findings, outputStatus)
-	}
+	findings = detector.FilterByStatus(findings)
 
 	totalBytes := detector.TotalBytes.Load()
 	bytesMsg := fmt.Sprintf("scanned ~%d bytes (%s)", totalBytes, bytesConvert(totalBytes))

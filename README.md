@@ -482,7 +482,7 @@ Expressions should return a map with a `"result"` key set to `valid`, `invalid`,
 Example
 Here is a standard validation block for a GitHub Personal Access Token. It uses CEL's optional chaining (.? and .orValue()) to safely extract metadata from the JSON response:
 
-Ini, TOML
+```TOML
 [[rules]]
 id = "github-pat"
 regex = '''ghp_[0-9a-zA-Z]{36}'''
@@ -504,6 +504,7 @@ validate = '''
     } : unknown(r)
   )
 '''
+```
 Note: For more complex validation setups—such as dynamically constructing URLs, using Basic Auth, or validating multi-part composite rules ([[rules.required]])—check out the existing examples in our built-in rules directory.
 
 

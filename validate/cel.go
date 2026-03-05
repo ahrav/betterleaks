@@ -109,6 +109,9 @@ func NewEnvironment(httpClient *http.Client) (*Environment, error) {
 
 		// unknown(response) returns {"result": "unknown", "reason": "HTTP <status>"}
 		// for use as a fallback when the HTTP status is unexpected.
+		// 429 (rate limited) is handled automatically so individual rules
+		// don't need to check for it.
+		// We can add more defaults here as needed
 		cel.Function("unknown",
 			cel.Overload("unknown_map",
 				[]*cel.Type{cel.MapType(cel.StringType, cel.DynType)},
@@ -118,7 +121,12 @@ func NewEnvironment(httpClient *http.Client) (*Environment, error) {
 					if nativeVal, err := val.ConvertToNative(mapAnyType); err == nil {
 						if resp, ok := nativeVal.(map[string]any); ok {
 							if status, ok := resp["status"]; ok {
-								m["reason"] = fmt.Sprintf("HTTP %v", status)
+								switch status {
+								case int64(429):
+									m["reason"] = "rate limited"
+								default:
+									m["reason"] = fmt.Sprintf("HTTP %v", status)
+								}
 							}
 						}
 					}

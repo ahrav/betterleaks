@@ -35,9 +35,6 @@ func HuggingFaceAccessToken() *config.Rule {
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
-  } : r.status == 429 && r.body.contains("rate limit") ? {
-    "result": "error",
-    "reason": "Rate limited"
   } : unknown(r)
 )`,
 	}
@@ -109,9 +106,6 @@ func HuggingFaceOrganizationApiToken() *config.Rule {
   } : r.status in [401, 403] ? {
     "result": "invalid",
     "reason": "Unauthorized"
-  } : r.status == 429 && r.body.contains("rate limit") ? {
-    "result": "error",
-    "reason": "Rate limited"
   } : unknown(r)
 )`,
 	}

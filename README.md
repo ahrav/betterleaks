@@ -307,30 +307,6 @@ id = "gitlab-pat"
     regexTarget = "line"
     regexes = [ '''MY-glpat-''' ]
 
-# Optional: validate whether a detected secret is live by firing an HTTP request.
-# The implicit {{ secret }} variable always contains the captured secret.
-# Named capture groups and Liquid filters are also supported.
-[[rules]]
-id = "awesome-rule-1-validated"
-description = "awesome rule 1 but validated"
-regex = '''awesome-secret-([a-zA-Z0-9]{32})'''
-keywords = ["awesome-secret-"]
-
-    [rules.validate]
-    type = "http"
-    method = "GET"
-    url = "https://api.example.com/v1/verify"
-    headers = { Authorization = "Token {{ secret }}" }
-    extract = { user = "json:user.email", scopes = "header:X-OAuth-Scopes" }
-
-    # match is a first-match-wins list; the first clause whose conditions all
-    # pass determines the finding status.
-    match = [
-        { status = 200, json = { active = true }, result = "valid" },
-        { status = 401, result = "invalid" },
-    ]
-
-
 # Global allowlists have a higher order of precedence than rule-specific allowlists.
 # If a commit listed in the `commits` field below is encountered then that commit will be skipped and no
 # secrets will be detected for said commit. The same logic applies for regexes and paths.
@@ -366,93 +342,7 @@ paths = ['''tests/expected/._\.json$''']
 
 Refer to the default [betterleaks config](https://github.com/betterleaks/betterleaks/blob/master/config/betterleaks.toml) for examples or follow the [contributing guidelines](https://github.com/betterleaks/betterleaks/blob/master/CONTRIBUTING.md) if you would like to contribute to the default configuration.
 
-### Additional Configuration
-
-#### Composite Rules (Multi-part or `required` Rules)
-Betterleaks ships with composite rules, which are made up of a single "primary" rule and one or more auxiliary or `required` rules. To create a composite rule, add a `[[rules.required]]` table to the primary rule specifying an `id` and optionally `withinLines` and/or `withinColumns` proximity constraints. A fragment is a chunk of content that Betterleaks processes at once (typically a file, part of a file, or git diff), and proximity matching instructs the primary rule to only report a finding if the auxiliary `required` rules also find matches within the specified area of the fragment.
-
-**Proximity matching:** Using the `withinLines` and `withinColumns` fields instructs the primary rule to only report a finding if the auxiliary `required` rules also find matches within the specified proximity. You can set:
-
-- **`withinLines: N`** - required findings must be within N lines (vertically)
-- **`withinColumns: N`** - required findings must be within N characters (horizontally)
-- **Both** - creates a rectangular search area (both constraints must be satisfied)
-- **Neither** - fragment-level matching (required findings can be anywhere in the same fragment)
-
-Here are diagrams illustrating each proximity behavior:
-
-```
-p = primary captured secret
-a = auxiliary (required) captured secret
-fragment = section of data gitleaks is looking at
-
-
-    *Fragment-level proximity*
-    Any required finding in the fragment
-          ┌────────┐
-   ┌──────┤fragment├─────┐
-   │      └──────┬─┤     │ ┌───────┐
-   │             │a│◀────┼─│✓ MATCH│
-   │          ┌─┐└─┘     │ └───────┘
-   │┌─┐       │p│        │
-   ││a│    ┌─┐└─┘        │ ┌───────┐
-   │└─┘    │a│◀──────────┼─│✓ MATCH│
-   └─▲─────┴─┴───────────┘ └───────┘
-     │    ┌───────┐
-     └────│✓ MATCH│
-          └───────┘
-
-
-   *Column bounded proximity*
-   `withinColumns = 3`
-          ┌────────┐
-   ┌────┬─┤fragment├─┬───┐
-   │      └──────┬─┤     │ ┌───────────┐
-   │    │        │a│◀┼───┼─│+1C ✓ MATCH│
-   │          ┌─┐└─┘     │ └───────────┘
-   │┌─┐ │     │p│    │   │
-┌──▶│a│  ┌─┐  └─┘        │ ┌───────────┐
-│  │└─┘ ││a│◀────────┼───┼─│-2C ✓ MATCH│
-│  │       ┘             │ └───────────┘
-│  └── -3C ───0C─── +3C ─┘
-│  ┌─────────┐
-│  │ -4C ✗ NO│
-└──│  MATCH  │
-   └─────────┘
-
-
-   *Line bounded proximity*
-   `withinLines = 4`
-         ┌────────┐
-   ┌─────┤fragment├─────┐
-  +4L─ ─ ┴────────┘─ ─ ─│
-   │                    │
-   │              ┌─┐   │ ┌────────────┐
-   │         ┌─┐  │a│◀──┼─│+1L ✓ MATCH │
-   0L  ┌─┐   │p│  └─┘   │ ├────────────┤
-   │   │a│◀──┴─┴────────┼─│-1L ✓ MATCH │
-   │   └─┘              │ └────────────┘
-   │                    │ ┌─────────┐
-  -4L─ ─ ─ ─ ─ ─ ─ ─┌─┐─│ │-5L ✗ NO │
-   │                │a│◀┼─│  MATCH  │
-   └────────────────┴─┴─┘ └─────────┘
-
-
-   *Line and column bounded proximity*
-   `withinLines = 4`
-   `withinColumns = 3`
-         ┌────────┐
-   ┌─────┤fragment├─────┐
-  +4L   ┌└────────┴ ┐   │
-   │            ┌─┐     │ ┌───────────────┐
-   │    │       │a│◀┼───┼─│+2L/+1C ✓ MATCH│
-   │         ┌─┐└─┘     │ └───────────────┘
-   0L   │    │p│    │   │
-   │         └─┘        │
-   │    │           │   │ ┌────────────┐
-  -4L    ─ ─ ─ ─ ─ ─┌─┐ │ │-5L/+3C ✗ NO│
-   │                │a│◀┼─│   MATCH    │
-   └───-3C────0L───+3C┴─┘ └────────────┘
-```
+## Additional Configuration
 
 ## Secrets Validation
 **⚠️ Secrets Validation is an experimental feature. To enable it, pass --experiments=validation.**
@@ -508,7 +398,18 @@ validate = '''
 Note: For more complex validation setups—such as dynamically constructing URLs, using Basic Auth, or validating multi-part composite rules ([[rules.required]])—check out the existing examples in our built-in rules directory.
 
 
-#### betterleaks:allow / gitleaks:allow
+## Composite Rules (Multi-part or `required` Rules)
+Betterleaks ships with composite rules, which are made up of a single "primary" rule and one or more auxiliary or `required` rules. To create a composite rule, add a `[[rules.required]]` table to the primary rule specifying an `id` and optionally `withinLines` and/or `withinColumns` proximity constraints. A fragment is a chunk of content that Betterleaks processes at once (typically a file, part of a file, or git diff), and proximity matching instructs the primary rule to only report a finding if the auxiliary `required` rules also find matches within the specified area of the fragment.
+
+**Proximity matching:** Using the `withinLines` and `withinColumns` fields instructs the primary rule to only report a finding if the auxiliary `required` rules also find matches within the specified proximity. You can set:
+
+- **`withinLines: N`** - required findings must be within N lines (vertically)
+- **`withinColumns: N`** - required findings must be within N characters (horizontally)
+- **Both** - creates a rectangular search area (both constraints must be satisfied)
+- **Neither** - fragment-level matching (required findings can be anywhere in the same fragment)
+
+
+## betterleaks:allow / gitleaks:allow
 
 If you are knowingly committing a test secret that betterleaks will catch you can add a `betterleaks:allow` (or `gitleaks:allow` for backwards compatibility) comment to that line which will instruct betterleaks
 to ignore that secret. Ex:
@@ -519,7 +420,7 @@ class CustomClass:
 
 ```
 
-#### .betterleaksignore / .gitleaksignore
+## .betterleaksignore / .gitleaksignore
 
 You can ignore specific findings by creating a `.betterleaksignore` (or `.gitleaksignore` for backwards compatibility) file at the root of your repo. In release v8.10.0 a `Fingerprint` value was added to the report. Each leak, or finding, has a Fingerprint that uniquely identifies a secret. Add this fingerprint to the ignore file to ignore that specific secret. See the [.gitleaksignore](https://github.com/betterleaks/betterleaks/blob/master/.betterleaksignore) for an example. Note: this feature is experimental and is subject to change in the future.
 

@@ -213,6 +213,46 @@ func TestDetect(t *testing.T) {
 				},
 			},
 		},
+		// Multiple instances of the same secret on a single line must produce
+		// findings with distinct StartColumn values pointing to each occurrence.
+		"detect finding - duplicate secret on same line": {
+			cfgName: "simple",
+			fragment: sources.Fragment{
+				Raw:      `#ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij...ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij`,
+				FilePath: "tmp.go",
+			},
+			expectedFindings: []report.Finding{
+				{
+					RuleID:      "github-pat",
+					Description: "Github Personal Access Token",
+					File:        "tmp.go",
+					Line:        `#ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij...ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij`,
+					Match:       "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+					Secret:      "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+					Entropy:     5.22193,
+					StartLine:   0,
+					EndLine:     0,
+					StartColumn: 2,
+					EndColumn:   41,
+					Tags:        []string{"key", "Github"},
+				},
+				{
+					RuleID:      "github-pat",
+					Description: "Github Personal Access Token",
+					File:        "tmp.go",
+					Line:        `#ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij...ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij`,
+					Match:       "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+					Secret:      "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+					Entropy:     5.22193,
+					StartLine:   0,
+					EndLine:     0,
+					StartColumn: 45,
+					EndColumn:   84,
+					Tags:        []string{"key", "Github"},
+				},
+			},
+		},
+
 		"detect finding - sidekiq env var": {
 			cfgName: "simple",
 			fragment: sources.Fragment{

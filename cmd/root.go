@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/betterleaks/betterleaks/celenv"
 	"github.com/betterleaks/betterleaks/config"
 	"github.com/betterleaks/betterleaks/detect"
 	"github.com/betterleaks/betterleaks/logging"
@@ -499,7 +500,7 @@ func setupValidation(cmd *cobra.Command, cfg config.Config, detector *detect.Det
 
 	workers := mustGetIntFlag(cmd, "validation-workers")
 	timeout, _ := cmd.Flags().GetDuration("validation-timeout")
-	env, err := validate.NewEnvironment(&http.Client{Timeout: timeout})
+	env, err := celenv.NewEnvironment(&http.Client{Timeout: timeout})
 	if err != nil {
 		logging.Fatal().Err(err).Msg("failed to create CEL validation environment")
 	}

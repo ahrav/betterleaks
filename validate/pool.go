@@ -1,11 +1,13 @@
 package validate
 
 import (
+	"fmt"
 	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
 
+	"github.com/betterleaks/betterleaks/celenv"
 	"github.com/betterleaks/betterleaks/logging"
 	"github.com/betterleaks/betterleaks/report"
 	"github.com/google/cel-go/cel"
@@ -20,9 +22,11 @@ type ValidationResult struct {
 
 // validationJob is the internal unit of work for the pool.
 type validationJob struct {
-	groupID  string
-	finding  report.Finding
-	program  any // cel.Program
+	groupID string
+	finding report.Finding
+	program any // cel.Program
+
+	// todo rename to componentCaptures?
 	captures map[string]string
 	required map[string]string
 }
@@ -48,7 +52,7 @@ type fingerprintState struct {
 
 // Pool manages a set of workers that validate findings asynchronously.
 type Pool struct {
-	env   *Environment
+	env   *celenv.Environment
 	cache *Cache
 	jobs  chan validationJob
 	wg    sync.WaitGroup
@@ -70,7 +74,7 @@ func (p *Pool) NewGroupID() string {
 }
 
 // NewPool creates a validation pool with the given number of workers.
-func NewPool(workers int, env *Environment) *Pool {
+func NewPool(workers int, env *celenv.Environment) *Pool {
 	if workers <= 0 {
 		workers = 10
 	}
@@ -143,32 +147,48 @@ func (p *Pool) worker() {
 
 		prg, ok := job.program.(cel.Program)
 		if !ok {
-			logging.Warn().
+			// gotta kill scan here
+			logging.Fatal().
 				Str("rule", job.finding.RuleID).
-				Msg("validation job has invalid program type")
+				Msg("invalid CELa program")
+		}
+
+		// collapse primary rule captures and required rule captures into one
+		// map
+		merged := job.captures
+		if len(job.required) > 0 {
+			merged = make(map[string]string, len(job.captures)+len(job.required))
+			maps.Copy(merged, job.captures)
+			maps.Copy(merged, job.required)
+		}
+		fmt.Println("merged, ", merged)
+		cacheKey := CacheKey(job.finding.RuleID, job.finding.Secret, merged)
+		fmt.Println("cache", cacheKey)
+		result, err := p.cache.GetOrDo(cacheKey, func() (*Result, error) {
+			val, evalErr := p.env.Eval(prg, job.finding.Secret, merged)
+			if evalErr != nil {
+				return &Result{Status: "error", Reason: evalErr.Error(), Metadata: map[string]any{}}, nil
+			}
+			r := ParseResult(val)
+			if p.env.DebugResponse {
+				if debugMeta := p.env.DebugMeta(); len(debugMeta) > 0 {
+					if r.Metadata == nil {
+						r.Metadata = make(map[string]any)
+					}
+					for k, v := range debugMeta {
+						r.Metadata[k] = v
+					}
+				}
+			}
+			return r, nil
+		})
+		if err != nil {
 			vr.Status = "error"
-			vr.Reason = "invalid CEL program type"
+			vr.Reason = err.Error()
 		} else {
-			// Merge required rule secrets into captures so the CEL
-			// program can reference them (e.g. captures["rule-id"]).
-			merged := job.captures
-			if len(job.required) > 0 {
-				merged = make(map[string]string, len(job.captures)+len(job.required))
-				maps.Copy(merged, job.captures)
-				maps.Copy(merged, job.required)
-			}
-			cacheKey := CacheKey(job.finding.RuleID, job.finding.Secret, merged)
-			result, err := p.cache.GetOrDo(cacheKey, func() (*Result, error) {
-				return p.env.Eval(prg, job.finding.Secret, merged)
-			})
-			if err != nil {
-				vr.Status = "error"
-				vr.Reason = err.Error()
-			} else {
-				vr.Status = result.Status
-				vr.Reason = result.Reason
-				vr.Meta = result.Metadata
-			}
+			vr.Status = result.Status
+			vr.Reason = result.Reason
+			vr.Meta = result.Metadata
 		}
 
 		p.mu.Lock()

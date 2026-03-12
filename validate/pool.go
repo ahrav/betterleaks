@@ -2,83 +2,46 @@ package validate
 
 import (
 	"maps"
-	"strconv"
 	"sync"
-	"sync/atomic"
 
-	"github.com/betterleaks/betterleaks/logging"
+	"github.com/betterleaks/betterleaks/celenv"
 	"github.com/betterleaks/betterleaks/report"
 	"github.com/google/cel-go/cel"
 )
 
-// ValidationResult holds the outcome of a single CEL validation attempt.
-type ValidationResult struct {
-	Status string
-	Reason string
-	Meta   map[string]any
-}
-
 // validationJob is the internal unit of work for the pool.
 type validationJob struct {
-	groupID  string
-	finding  report.Finding
-	program  any // cel.Program
+	finding report.Finding
+	program cel.Program
+
+	// todo rename to componentCaptures?
 	captures map[string]string
 	required map[string]string
 }
 
-// statusPriority defines the preference order when merging results for the same
-// fingerprint. Lower number = higher priority ("valid" wins over everything).
-var statusPriority = map[string]int{
-	"valid":   0,
-	"invalid": 1,
-	"revoked": 2,
-	"unknown": 3,
-	"error":   4,
-}
-
-// fingerprintState tracks combo results for a single fingerprint.
-type fingerprintState struct {
-	finding  report.Finding
-	best     ValidationResult
-	hasBest  bool
-	pending  int
-	resolved bool
-}
-
 // Pool manages a set of workers that validate findings asynchronously.
 type Pool struct {
-	env   *Environment
+	env   *celenv.Environment
 	cache *Cache
-	jobs  chan validationJob
-	wg    sync.WaitGroup
 
-	nextGroup atomic.Uint64
-
-	mu     sync.Mutex
-	states map[string]*fingerprintState
+	// one job per to-be-validated finding
+	jobs chan validationJob
+	wg   sync.WaitGroup
 
 	// FindingsCh receives fully-resolved, enriched findings. It is owned and
 	// closed by the Detector; Pool only sends to it.
 	FindingsCh chan<- report.Finding
 }
 
-// NewGroupID returns a unique opaque ID to be shared across all Submit calls
-// for a single finding (e.g. all combo expansions of one multi-part rule).
-func (p *Pool) NewGroupID() string {
-	return strconv.FormatUint(p.nextGroup.Add(1), 10)
-}
-
 // NewPool creates a validation pool with the given number of workers.
-func NewPool(workers int, env *Environment) *Pool {
+func NewPool(workers int, env *celenv.Environment) *Pool {
 	if workers <= 0 {
 		workers = 10
 	}
 	p := &Pool{
-		env:    env,
-		cache:  NewCache(),
-		jobs:   make(chan validationJob, workers*10),
-		states: make(map[string]*fingerprintState),
+		env:   env,
+		cache: NewCache(),
+		jobs:  make(chan validationJob, workers*10),
 	}
 
 	for i := 0; i < workers; i++ {
@@ -89,19 +52,9 @@ func NewPool(workers int, env *Environment) *Pool {
 	return p
 }
 
-// Submit queues a combo job for validation under groupID. count is the total
-// number of Submit calls sharing this groupID (1 for simple findings, N for
-// combo expansion). All Submit calls for the same group must pass the same
-// count and finding values. Use NewGroupID to allocate a fresh groupID.
-func (p *Pool) Submit(groupID string, finding report.Finding, program any, captures map[string]string, required map[string]string, count int) {
-	p.mu.Lock()
-	if _, ok := p.states[groupID]; !ok {
-		p.states[groupID] = &fingerprintState{pending: count, finding: finding}
-	}
-	p.mu.Unlock()
-
+// Submit queues a job for validation.
+func (p *Pool) Submit(finding report.Finding, program cel.Program, captures map[string]string, required map[string]string) {
 	p.jobs <- validationJob{
-		groupID:  groupID,
 		finding:  finding,
 		program:  program,
 		captures: captures,
@@ -124,81 +77,41 @@ func (p *Pool) Stats() (hits, misses uint64) {
 func (p *Pool) worker() {
 	defer p.wg.Done()
 	for job := range p.jobs {
-		// Skip jobs whose group has already resolved (e.g. short-circuited by "valid").
-		p.mu.Lock()
-		state := p.states[job.groupID]
-		if state.resolved {
-			state.pending--
-			if state.pending <= 0 {
-				delete(p.states, job.groupID)
+		merged := job.captures
+		if len(job.required) > 0 {
+			merged = make(map[string]string, len(job.captures)+len(job.required))
+			maps.Copy(merged, job.captures)
+			maps.Copy(merged, job.required)
+		}
+
+		cacheKey := CacheKey(job.finding.RuleID, job.finding.Secret, merged)
+		result, err := p.cache.GetOrDo(cacheKey, func() (*Result, error) {
+			val, evalErr := p.env.Eval(job.program, job.finding.Secret, merged)
+			if evalErr != nil {
+				return &Result{Status: "error", Reason: evalErr.Error(), Metadata: map[string]any{}}, nil
 			}
-			p.mu.Unlock()
-			continue
-		}
-		p.mu.Unlock()
+			r := ParseResult(val)
+			if p.env.DebugResponse {
+				if debugMeta := p.env.DebugMeta(); len(debugMeta) > 0 {
+					if r.Metadata == nil {
+						r.Metadata = make(map[string]any)
+					}
+					maps.Copy(r.Metadata, debugMeta)
+				}
+			}
+			return r, nil
+		})
 
-		vr := ValidationResult{
-			Meta: map[string]any{},
-		}
-
-		prg, ok := job.program.(cel.Program)
-		if !ok {
-			logging.Warn().
-				Str("rule", job.finding.RuleID).
-				Msg("validation job has invalid program type")
-			vr.Status = "error"
-			vr.Reason = "invalid CEL program type"
+		f := job.finding
+		if err != nil {
+			f.ValidationStatus = "error"
+			f.ValidationReason = err.Error()
 		} else {
-			// Merge required rule secrets into captures so the CEL
-			// program can reference them (e.g. captures["rule-id"]).
-			merged := job.captures
-			if len(job.required) > 0 {
-				merged = make(map[string]string, len(job.captures)+len(job.required))
-				maps.Copy(merged, job.captures)
-				maps.Copy(merged, job.required)
-			}
-			cacheKey := CacheKey(job.finding.RuleID, job.finding.Secret, merged)
-			result, err := p.cache.GetOrDo(cacheKey, func() (*Result, error) {
-				return p.env.Eval(prg, job.finding.Secret, merged)
-			})
-			if err != nil {
-				vr.Status = "error"
-				vr.Reason = err.Error()
-			} else {
-				vr.Status = result.Status
-				vr.Reason = result.Reason
-				vr.Meta = result.Metadata
-			}
+			f.ValidationStatus = result.Status
+			f.ValidationReason = result.Reason
+			f.ValidationMeta = result.Metadata
 		}
-
-		p.mu.Lock()
-		state = p.states[job.groupID]
-		state.pending--
-
-		// Update best if this result has higher priority.
-		newPri := statusPriority[vr.Status]
-		if !state.hasBest || newPri < statusPriority[state.best.Status] {
-			state.best = vr
-			state.hasBest = true
-		}
-
-		// Resolve when all combos done OR "valid" short-circuits.
-		shouldFire := false
-		if !state.resolved && (state.pending <= 0 || vr.Status == "valid") {
-			state.resolved = true
-			shouldFire = true
-		}
-		if state.pending <= 0 {
-			delete(p.states, job.groupID)
-		}
-		best := state.best
-		f := state.finding
-		p.mu.Unlock()
-
-		if shouldFire && p.FindingsCh != nil {
-			f.ValidationStatus = best.Status
-			f.ValidationReason = best.Reason
-			f.ValidationMeta = best.Meta
+		if p.FindingsCh != nil {
 			p.FindingsCh <- f
 		}
 	}

@@ -84,6 +84,8 @@ func (c *Cache) GetOrDo(key string, fn func() (*Result, error)) (*Result, error)
 	if err != nil {
 		return nil, err
 	}
+
+	// cast to validation Result and return
 	return v.(*Result), nil
 }
 

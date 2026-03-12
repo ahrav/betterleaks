@@ -946,41 +946,15 @@ func (d *Detector) AddFinding(finding report.Finding) {
 }
 
 // submitValidation expands combo required-rule findings and submits each to
-// the validation pool under a shared group ID.
+// the validation pool.
 func (d *Detector) submitValidation(finding report.Finding, rule config.Rule) {
-	groupID := d.ValidationPool.NewGroupID()
 	reqs := finding.RequiredFindings()
-	if len(reqs) > 0 {
-		ruleIDs := make([]string, 0)
-		secretsByRule := make(map[string][]string)
-		seen := make(map[string]struct{})
-		type captureKey struct{ ruleID, secret string }
-		captureIndex := make(map[captureKey]map[string]string)
-		for _, req := range reqs {
-			if _, ok := seen[req.RuleID]; !ok {
-				seen[req.RuleID] = struct{}{}
-				ruleIDs = append(ruleIDs, req.RuleID)
-			}
-			secretsByRule[req.RuleID] = append(secretsByRule[req.RuleID], req.Secret)
-			if len(req.CaptureGroups) > 0 {
-				captureIndex[captureKey{req.RuleID, req.Secret}] = req.CaptureGroups
-			}
-		}
-		combos := validate.Combos(ruleIDs, secretsByRule)
-		for _, combo := range combos {
-			expanded := make(map[string]string, len(combo)*2)
-			for ruleID, secret := range combo {
-				expanded[ruleID] = secret
-				if caps, ok := captureIndex[captureKey{ruleID, secret}]; ok {
-					for name, val := range caps {
-						expanded[ruleID+":"+name] = val
-					}
-				}
-			}
-			d.ValidationPool.Submit(groupID, finding, rule.CelProgram(), finding.CaptureGroups, expanded, len(combos))
-		}
-	} else {
-		d.ValidationPool.Submit(groupID, finding, rule.CelProgram(), finding.CaptureGroups, nil, 1)
+	if len(reqs) == 0 {
+		d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, nil)
+		return
+	}
+	for _, expanded := range validate.ExpandRequired(reqs) {
+		d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, expanded)
 	}
 }
 

@@ -1,4 +1,4 @@
-package validate
+package celenv
 
 import (
 	"testing"

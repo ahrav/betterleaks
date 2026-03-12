@@ -131,6 +131,8 @@ func (e *Environment) captureDebug(method, url, reqBody string, req *http.Reques
 // buildResponseMap constructs the CEL map returned by http.get / http.post.
 func buildResponseMap(statusCode int, body []byte, header http.Header) ref.Val {
 	var jsonBody any
+
+	// TODO log err
 	if err := json.Unmarshal(body, &jsonBody); err != nil {
 		jsonBody = map[string]any{}
 	}

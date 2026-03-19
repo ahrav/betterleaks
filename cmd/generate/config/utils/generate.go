@@ -160,3 +160,7 @@ func GenerateSampleSecrets(identifier string, secret string) []string {
 	}
 	return cases
 }
+
+func Ptr[T any](v T) *T {
+	return &v
+}

@@ -945,17 +945,11 @@ func (d *Detector) AddFinding(finding report.Finding) {
 	d.findingsCh <- finding
 }
 
-// submitValidation expands combo required-rule findings and submits each to
-// the validation pool.
+// submitValidation submits a finding to the validation pool.
+// Required findings are passed through so the pool can expand combos,
+// annotate per-component status, and emit a single deduplicated result.
 func (d *Detector) submitValidation(finding report.Finding, rule config.Rule) {
-	reqs := finding.RequiredFindings()
-	if len(reqs) == 0 {
-		d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, nil)
-		return
-	}
-	for _, expanded := range validate.ExpandRequired(reqs) {
-		d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, expanded)
-	}
+	d.ValidationPool.Submit(finding, rule.CelProgram(), finding.CaptureGroups, finding.RequiredFindings())
 }
 
 // Findings returns the findings added to the detector

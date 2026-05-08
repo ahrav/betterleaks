@@ -456,6 +456,19 @@ func (d *Detector) Run(ctx context.Context, source sources.Source) iter.Seq[Resu
 				if res.Finding.ValidationStatus != "" {
 					d.ValidationCounts[res.Finding.ValidationStatus]++
 				}
+
+				// Check validation status and if we should filter or not
+// Check validation status and if we should filter or not
+				if len(d.ValidationStatusFilter) > 0 {
+					if res.Finding.ValidationStatus != "" {
+						if _, ok := d.ValidationStatusFilter[res.Finding.ValidationStatus]; !ok {
+							continue
+						}
+					} else if _, ok := d.ValidationStatusFilter["none"]; !ok {
+						continue
+					}
+				}
+
 				if !d.SkipFindingAppend {
 					d.findings = append(d.findings, res.Finding)
 				}

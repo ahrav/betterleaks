@@ -77,8 +77,12 @@ func NewEnvironment(httpClient *http.Client) (*ValidationEnvironment, error) {
 		ext.Strings(),
 		ext.Encoders(),
 
-		cel.Variable("secret", cel.StringType),
 		cel.Variable("captures", cel.MapType(cel.StringType, cel.StringType)),
+		cel.Variable("finding", cel.MapType(cel.StringType, cel.StringType)),
+		// `secret` is retained as an alias for finding["secret"] so external
+		// rule configs that reference the bare variable continue to compile.
+		// New expressions should prefer finding["secret"] for consistency.
+		cel.Variable("secret", cel.StringType),
 
 		cel.Function("http.get",
 			cel.Overload("http_get_string_map",
@@ -207,9 +211,11 @@ func (e *ValidationEnvironment) Compile(expression string) (cel.Program, error) 
 	return prg, nil
 }
 
-// Eval evaluates a compiled CEL program with the given secret and captures,
-// returning the raw CEL output value.
-func (e *ValidationEnvironment) Eval(prg cel.Program, secret string, captures map[string]string) (ref.Val, error) {
+// Eval evaluates a compiled CEL program with the given finding and captures,
+// returning the raw CEL output value. The finding map should contain a "secret"
+// entry; CEL expressions read the secret via finding["secret"] (or via the
+// `secret` alias variable, which is bound to the same value).
+func (e *ValidationEnvironment) Eval(prg cel.Program, finding, captures map[string]string) (ref.Val, error) {
 	if e.DebugResponse {
 		e.debugMu.Lock()
 		defer e.debugMu.Unlock()
@@ -220,9 +226,14 @@ func (e *ValidationEnvironment) Eval(prg cel.Program, secret string, captures ma
 		captures = make(map[string]string)
 	}
 
+	if finding == nil {
+		finding = make(map[string]string)
+	}
+
 	vars := map[string]any{
-		"secret":   secret,
 		"captures": captures,
+		"finding":  finding,
+		"secret":   finding["secret"],
 	}
 
 	val, _, err := prg.Eval(vars)

@@ -93,7 +93,7 @@ func (p *Pool) worker() {
 
 		if len(f.RequiredSets) == 0 {
 			// Simple path: no required components, validate the secret with its own captures.
-			result, err := p.evalWithCaptures(job.program, job.finding.RuleID, job.finding.Secret, job.captures)
+			result, err := p.evalWithCaptures(job.program, job.finding.RuleID, job.finding.Secret, f.ToCELMap(), job.captures)
 			if err != nil {
 				f.ValidationStatus = "error"
 				f.ValidationReason = err.Error()
@@ -136,7 +136,7 @@ func (p *Pool) worker() {
 				result = r
 			} else {
 				var err error
-				result, err = p.evalWithCacheKey(cacheKey, job.program, job.finding.Secret, merged)
+				result, err = p.evalWithCacheKey(cacheKey, job.program, f.ToCELMap(), merged)
 				if err != nil {
 					result = &Result{Status: "error", Reason: err.Error(), Metadata: map[string]any{}}
 				}
@@ -185,16 +185,17 @@ func (p *Pool) worker() {
 }
 
 // evalWithCaptures runs the CEL program for the given secret and captures,
-// using the cache to avoid duplicate HTTP requests.
-func (p *Pool) evalWithCaptures(program cel.Program, ruleID, secret string, captures map[string]string) (*Result, error) {
+// using the cache to avoid duplicate HTTP requests. The secret is used only
+// for cache keying; the CEL program reads it from finding["secret"].
+func (p *Pool) evalWithCaptures(program cel.Program, ruleID, secret string, finding, captures map[string]string) (*Result, error) {
 	cacheKey := CacheKey(ruleID, secret, captures)
-	return p.evalWithCacheKey(cacheKey, program, secret, captures)
+	return p.evalWithCacheKey(cacheKey, program, finding, captures)
 }
 
 // evalWithCacheKey runs the CEL program using the given pre-computed cache key.
-func (p *Pool) evalWithCacheKey(cacheKey string, program cel.Program, secret string, captures map[string]string) (*Result, error) {
+func (p *Pool) evalWithCacheKey(cacheKey string, program cel.Program, finding, captures map[string]string) (*Result, error) {
 	return p.cache.GetOrDo(cacheKey, func() (*Result, error) {
-		val, evalErr := p.env.Eval(program, secret, captures)
+		val, evalErr := p.env.Eval(program, finding, captures)
 		if evalErr != nil {
 			return &Result{Status: "error", Reason: evalErr.Error(), Metadata: map[string]any{}}, nil
 		}

@@ -596,3 +596,15 @@ func (f *Finding) SetFingerprint() {
 		f.Fingerprint = globalFingerprint
 	}
 }
+
+// ToCELMap returns the fixed-shape map[string]string used as the `finding`
+// variable in CEL filter and validation expressions.
+func (f *Finding) ToCELMap() map[string]string {
+	return map[string]string{
+		"secret":      f.Secret,
+		"match":       f.Match,
+		"line":        f.Line,
+		"rule_id":     f.RuleID,
+		"description": f.Description,
+	}
+}

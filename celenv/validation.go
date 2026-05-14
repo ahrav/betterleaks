@@ -37,6 +37,12 @@ type ValidationEnvironment struct {
 
 	// STSEndpoint overrides the default AWS STS endpoint (for testing).
 	STSEndpoint string
+
+	// AllowedEnv is the set of environment variable names the env(...) CEL
+	// binding may read (via os.Getenv). Names not in this set produce a CEL
+	// error. Nil or empty disables env(...) entirely. Populated from
+	// --validation-env-vars by the detector.
+	AllowedEnv map[string]struct{}
 }
 
 // DefaultHTTPClient returns an HTTP client with reasonable timeouts.
@@ -104,6 +110,16 @@ func NewEnvironment(httpClient *http.Client) (*ValidationEnvironment, error) {
 			),
 		),
 
+		// env(name) returns os.Getenv(name) when name is allowlisted
+		// (ValidationEnvironment.AllowedEnv); otherwise returns a CEL error.
+		cel.Function("env",
+			cel.Overload("env_string",
+				[]*cel.Type{cel.StringType},
+				cel.StringType,
+				cel.UnaryBinding(envBinding(e)),
+			),
+		),
+
 		// obfuscate(secret) returns a same-length, class-preserving
 		// perturbation of secret with a stable identifying prefix.
 		cel.Function("obfuscate",
@@ -136,6 +152,15 @@ func NewEnvironment(httpClient *http.Client) (*ValidationEnvironment, error) {
 					}
 					return types.DefaultTypeAdapter.NativeToValue(m)
 				}),
+			),
+		),
+
+		// json.string(s) returns s as a JSON string literal (quoted, escaped).
+		cel.Function("json.string",
+			cel.Overload("json_string_string",
+				[]*cel.Type{cel.StringType},
+				cel.StringType,
+				cel.UnaryBinding(jsonStringBinding()),
 			),
 		),
 

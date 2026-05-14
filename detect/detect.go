@@ -787,6 +787,17 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 		finding.SetFingerprint()
 
+		// before setting CELContext, check if we have a validate or filter (TODO rename CelProgram to ValidateProgram)
+		if r.CelProgram() != nil || d.Config.FilterProgram() != nil || r.FilterProgram() != nil {
+			finding.SetCELContext(extractContext(fragment.Raw, matchIndex, MatchContextSpec{
+				Mode:        ContextModeBox,
+				LinesBefore: 20,
+				LinesAfter:  20,
+				ColsBefore:  350,
+				ColsAfter:   350,
+			}))
+		}
+
 		// Build finding map once, only when at least one filter program is compiled.
 		var findingMap map[string]string
 		if d.Config.FilterProgram() != nil || r.FilterProgram() != nil {

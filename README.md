@@ -1,9 +1,9 @@
 # Betterleaks
 ```
-  ○
-  ○
-  ●
-  ○
+     ○ 
+     ○
+ghp_ ● qOomCIZBWchHR4v5FPp9UiQRS9CyigrCkXXuIJQPfe63f12a
+     ○ 
 ```
 
 Betterleaks is a tool for finding secrets like passwords and API keys. If you want to learn more about how the detection engine works check out this blog: [Regex is (almost) all you need](https://lookingatcomputer.substack.com/p/regex-is-almost-all-you-need).

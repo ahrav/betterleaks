@@ -132,6 +132,8 @@ cel.bind(r,
 
 Refer to the default [betterleaks config](https://github.com/betterleaks/betterleaks/blob/main/config/betterleaks.toml) for examples and the [config docs](docs/config.md) for more information about the `betterleaks.toml` config.
 
+Test out your rules in the [Betterleaks Playground](https://betterleaks.com/playground)
+
 ### Exit Codes
 
 Set the exit code when leaks are encountered with the --exit-code flag. Default exit codes below:

@@ -136,16 +136,6 @@ cel.bind(r,
 '''
 ```
 
-Refer to the default [betterleaks config](https://github.com/betterleaks/betterleaks/blob/main/config/betterleaks.toml) for examples and the [config docs](docs/config.md) for more information about the `betterleaks.toml` config.
+Refer to the default [betterleaks config](https://github.com/betterleaks/betterleaks/blob/main/config/betterleaks.toml) for examples and the [config docs](docs/config.md) for more information about the `betterleaks.toml` config. If you're using Betterleaks in production, it is recommended you maintain your own config instead of extending the upstream default config directly. This keeps your rule set stable across Betterleaks upgrades and lets you review new upstream rules before adopting them.
 
 Test out your rules in the [Betterleaks Playground](https://betterleaks.com/playground)
-
-### Exit Codes
-
-Set the exit code when leaks are encountered with the --exit-code flag. Default exit codes below:
-
-```
-0 - no leaks present
-1 - leaks or error encountered
-126 - unknown flag
-```

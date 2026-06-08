@@ -561,7 +561,7 @@ func (d *Detector) DetectString(content string) []report.Finding {
 func (d *Detector) detectFragment(ctx context.Context, fragment sources.Fragment) []report.Finding {
 	// Skip the config file and baseline file to prevent self-scanning.
 	if path := fragment.Attr(sources.AttrPath); path != "" {
-		if path == d.Config.Path || (d.baselinePath != "" && path == d.baselinePath) {
+		if samePath(path, d.Config.Path) || (d.baselinePath != "" && samePath(path, d.baselinePath)) {
 			return nil
 		}
 	}

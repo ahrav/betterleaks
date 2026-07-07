@@ -66,24 +66,34 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 		return s.runSingleWorker(ctx, yield)
 	}
 
-	// Commit diff sizes follow a power-law: contiguous chunks leave one worker
-	// grinding through a hot region long after the others finish. Deal commits
-	// round-robin so heavy regions spread across all workers.
-	chunks := make([][]string, workers)
-	chunkSize := (count + workers - 1) / workers
-	for i := range chunks {
-		chunks[i] = make([]string, 0, chunkSize)
+	// Commit diff sizes follow a power-law: any static partition leaves some
+	// workers grinding through hot regions long after the rest finish. Split
+	// the commit list into many small batches and let workers pull them from
+	// a shared queue so load balances dynamically. Batches are sized to keep
+	// per-process git startup overhead amortized while still giving each
+	// worker enough batches (~8) to smooth out heavy tails.
+	batchSize := max(count/(workers*8), 64)
+	numBatches := (count + batchSize - 1) / batchSize
+	logging.Info().Int("commits", count).Int("workers", workers).Int("batch_size", batchSize).Int("batches", numBatches).Msg("parallel git scan")
+
+	batches := make(chan []string, numBatches)
+	for start := 0; start < count; start += batchSize {
+		batches <- commits[start:min(start+batchSize, count)]
 	}
-	for i, sha := range commits {
-		w := i % workers
-		chunks[w] = append(chunks[w], sha)
-	}
-	logging.Info().Int("commits", count).Int("workers", workers).Int("chunk_size", chunkSize).Msg("parallel git scan")
+	close(batches)
 
 	g, gctx := errgroup.WithContext(ctx)
-	for _, chunk := range chunks {
+	for range workers {
 		g.Go(func() error {
-			return s.runWorkerCommits(gctx, yield, chunk)
+			for batch := range batches {
+				if err := gctx.Err(); err != nil {
+					return err
+				}
+				if err := s.runWorkerCommits(gctx, yield, batch); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	}
 

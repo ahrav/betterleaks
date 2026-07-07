@@ -102,10 +102,6 @@ type Detector struct {
 	// matching given a set of words (keywords from the rules in the config)
 	prefilter *ahocorasick.Matcher
 
-	// scanCache memoizes per-rule regex results for repeated fragment
-	// content (git history repeats hunks across commits).
-	scanCache *scanCache
-
 	// a list of known findings that should be ignored
 	baseline []report.Finding
 
@@ -234,7 +230,6 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 		ValidationCounts:       make(map[report.ValidationStatus]int),
 		Config:                 cfg,
 		prefilter:              ahocorasick.CompileStrings(maps.Keys(cfg.Keywords)),
-		scanCache:              newScanCache(),
 		Sema:                   semgroup.NewGroup(ctx, 40),
 		exprRuntime:            exprRuntime,
 		validationRuntime:      validationRuntime,
@@ -694,21 +689,13 @@ ScanLoop:
 			}
 
 			ruleIDs := d.orderedRuleIDs(rulesToCheck)
-
-			// Hash once per decode pass; every rule shares the same content key.
-			var contentKey fragmentContentKey
-			if len(currentRaw) >= scanCacheMinLen {
-				contentKey.h1, contentKey.h2 = hashContent(currentRaw)
-				contentKey.valid = true
-			}
-
 			for _, ruleID := range ruleIDs {
 				select {
 				case <-ctx.Done():
 					break ScanLoop
 				default:
 					rule := d.Config.Rules[ruleID]
-					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, contentKey, rule, encodedSegments, findings)...)
+					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings)...)
 				}
 			}
 
@@ -778,17 +765,8 @@ func orderedRulesBySpecificity(cfg *config.Config) []string {
 }
 
 // detectFragmentWithRule scans the given fragment for the given rule and returns a list of findings
-// fragmentContentKey carries a precomputed hash of the fragment content for
-// scan-cache lookups. Invalid keys (content below the cache threshold) skip
-// the cache entirely.
-type fragmentContentKey struct {
-	h1, h2 uint64
-	valid  bool
-}
-
 func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 	currentRaw string,
-	contentKey fragmentContentKey,
 	r config.Rule,
 	encodedSegments []*codec.EncodedSegment,
 	priorFindings []report.Finding) []report.Finding {
@@ -829,21 +807,7 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 		return findings
 	}
 
-	var (
-		matches  [][]int
-		cacheKey scanCacheKey
-	)
-	if contentKey.valid {
-		cacheKey = scanCacheKey{h1: contentKey.h1, h2: contentKey.h2, ruleID: r.RuleID}
-		if cached, ok := d.scanCache.get(cacheKey); ok {
-			matches = cached
-		} else {
-			matches = r.Regex.FindAllStringIndex(currentRaw, -1)
-			d.scanCache.put(cacheKey, matches)
-		}
-	} else {
-		matches = r.Regex.FindAllStringIndex(currentRaw, -1)
-	}
+	matches := r.Regex.FindAllStringIndex(currentRaw, -1)
 	if len(matches) == 0 {
 		return findings
 	}
@@ -1046,11 +1010,11 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 	}
 
 	// Process required rules and create findings with auxiliary findings
-	return d.processRequiredRules(fragment, currentRaw, contentKey, r, encodedSegments, findings, logger)
+	return d.processRequiredRules(fragment, currentRaw, r, encodedSegments, findings, logger)
 }
 
 // processRequiredRules handles the logic for multi-part rules with auxiliary findings
-func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw string, contentKey fragmentContentKey, r config.Rule, encodedSegments []*codec.EncodedSegment, primaryFindings []report.Finding, logger func() *zerolog.Logger) []report.Finding {
+func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw string, r config.Rule, encodedSegments []*codec.EncodedSegment, primaryFindings []report.Finding, logger func() *zerolog.Logger) []report.Finding {
 	if len(primaryFindings) == 0 {
 		logger().Debug().Msg("no primary findings to process for required rules")
 		return primaryFindings
@@ -1071,7 +1035,7 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 		inheritedFragment.InheritedFromFinding = true
 
 		// Call detectRule once for each required rule
-		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, contentKey, rule, encodedSegments, nil)
+		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, rule, encodedSegments, nil)
 		allRequiredFindings[requiredRule.RuleID] = requiredFindings
 
 		logger().Debug().

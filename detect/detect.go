@@ -103,6 +103,11 @@ type Detector struct {
 	// matching given a set of words (keywords from the rules in the config)
 	prefilter *ahocorasick.Matcher
 
+	// ruleGates holds cheap rejection regexes for semi-generic rules; see
+	// rule_gate.go. A fragment that fails a rule's gate cannot match the
+	// rule's full pattern, so the expensive scan is skipped.
+	ruleGates map[string]*blregexp.Regexp
+
 	// a list of known findings that should be ignored
 	baseline []report.Finding
 
@@ -246,6 +251,13 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 	for i, ruleID := range d.rulesBySpecificity {
 		d.ruleRank[ruleID] = i
 	}
+	rulePatterns := make(map[string]string, len(cfg.Rules))
+	for ruleID, r := range cfg.Rules {
+		if r.Regex != nil {
+			rulePatterns[ruleID] = r.Regex.String()
+		}
+	}
+	d.ruleGates = compileRuleGates(rulePatterns)
 	exprRuntime.SetTokenizerProvider(d.Tokenizer)
 
 	// Compile only global prefilter programs so they are available before scanning.
@@ -814,6 +826,12 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 	// if path only rule, skip content checks
 	if r.Regex == nil {
+		return findings
+	}
+
+	// Cheap rejection gate: the prefix-stripped pattern matches iff the full
+	// pattern has any match, and it scans ~3x faster (see rule_gate.go).
+	if gate, ok := d.ruleGates[r.RuleID]; ok && !gate.MatchString(currentRaw) {
 		return findings
 	}
 

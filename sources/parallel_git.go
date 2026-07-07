@@ -37,7 +37,7 @@ func (s *ParallelGit) workers() int {
 	if s.Workers > 0 {
 		return s.Workers
 	}
-	return min(runtime.NumCPU(), 16)
+	return runtime.NumCPU()
 }
 
 // Fragments implements Source by partitioning commits across

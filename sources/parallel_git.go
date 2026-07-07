@@ -66,17 +66,22 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 		return s.runSingleWorker(ctx, yield)
 	}
 
+	// Commit diff sizes follow a power-law: contiguous chunks leave one worker
+	// grinding through a hot region long after the others finish. Deal commits
+	// round-robin so heavy regions spread across all workers.
+	chunks := make([][]string, workers)
 	chunkSize := (count + workers - 1) / workers
+	for i := range chunks {
+		chunks[i] = make([]string, 0, chunkSize)
+	}
+	for i, sha := range commits {
+		w := i % workers
+		chunks[w] = append(chunks[w], sha)
+	}
 	logging.Info().Int("commits", count).Int("workers", workers).Int("chunk_size", chunkSize).Msg("parallel git scan")
 
 	g, gctx := errgroup.WithContext(ctx)
-	for i := range workers {
-		start := i * chunkSize
-		if start >= count {
-			break
-		}
-		end := min(start+chunkSize, count)
-		chunk := commits[start:end]
+	for _, chunk := range chunks {
 		g.Go(func() error {
 			return s.runWorkerCommits(gctx, yield, chunk)
 		})

@@ -18,8 +18,14 @@ test: config/betterleaks.toml format
 failfast: format
 	go test -failfast ./...
 
+# Native RE2 (cgo) is ~2x faster end-to-end than the default wazero engine.
+# Requires libre2 headers (re2-devel / libre2-dev). Use `make build-portable`
+# for a CGO-free static binary.
 build:
-	go build $(LDFLAGS) -o betterleaks .
+	CGO_ENABLED=1 go build -tags re2_cgo $(LDFLAGS) -o betterleaks .
+
+build-portable:
+	CGO_ENABLED=0 go build $(LDFLAGS) -o betterleaks .
 
 lint:
 	golangci-lint run

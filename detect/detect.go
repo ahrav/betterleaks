@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -233,7 +234,7 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 		ValidationCounts:       make(map[report.ValidationStatus]int),
 		Config:                 cfg,
 		prefilter:              ahocorasick.CompileStrings(maps.Keys(cfg.Keywords)),
-		Sema:                   semgroup.NewGroup(ctx, 40),
+		Sema:                   semgroup.NewGroup(ctx, int64(max(40, runtime.NumCPU()*2))),
 		exprRuntime:            exprRuntime,
 		validationRuntime:      validationRuntime,
 		validationPrograms:     make(map[string]exprruntime.Program),
@@ -684,8 +685,9 @@ ScanLoop:
 			// Build a set of rule IDs to check based on keyword matches.
 			rulesToCheck := make(map[string]struct{}, len(acMatches))
 			for _, m := range acMatches {
-				keyword := string(m.Word)
-				for _, ruleID := range d.Config.KeywordToRules[keyword] {
+				// Inline conversion lets the compiler elide the []byte->string
+				// copy for the map lookup.
+				for _, ruleID := range d.Config.KeywordToRules[string(m.Word)] {
 					rulesToCheck[ruleID] = struct{}{}
 				}
 			}

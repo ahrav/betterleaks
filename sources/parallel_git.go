@@ -66,19 +66,25 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 		return s.runSingleWorker(ctx, yield)
 	}
 
-	// Commit diff sizes follow a power-law: any static partition leaves some
-	// workers grinding through hot regions long after the rest finish. Split
-	// the commit list into many small batches and let workers pull them from
-	// a shared queue so load balances dynamically. Batches are sized to keep
-	// per-process git startup overhead amortized while still giving each
-	// worker enough batches (~8) to smooth out heavy tails.
+	// Commit diff sizes follow a power-law and heavy commits cluster in
+	// contiguous stretches of history (vendored-dependency churn, imports),
+	// so contiguous partitions straggle. Two mitigations compose here:
+	// batches are built by striding across the whole history (batch k gets
+	// commits k, k+N, k+2N, ...) so every batch samples heavy regions
+	// uniformly, and workers pull batches from a shared queue so residual
+	// imbalance self-corrects. Batch count targets ~8 batches per worker to
+	// amortize git process startup while smoothing heavy tails.
 	batchSize := max(count/(workers*8), 64)
 	numBatches := (count + batchSize - 1) / batchSize
 	logging.Info().Int("commits", count).Int("workers", workers).Int("batch_size", batchSize).Int("batches", numBatches).Msg("parallel git scan")
 
 	batches := make(chan []string, numBatches)
-	for start := 0; start < count; start += batchSize {
-		batches <- commits[start:min(start+batchSize, count)]
+	for b := range numBatches {
+		batch := make([]string, 0, batchSize)
+		for i := b; i < count; i += numBatches {
+			batch = append(batch, commits[i])
+		}
+		batches <- batch
 	}
 	close(batches)
 

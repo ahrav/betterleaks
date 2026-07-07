@@ -27,8 +27,8 @@ import (
 	"github.com/betterleaks/betterleaks/report"
 	"github.com/betterleaks/betterleaks/sources"
 
+	ahocorasick "github.com/BobuSumisu/aho-corasick"
 	"github.com/fatih/semgroup"
-	ahocorasick "github.com/rrethy/ahocorasick"
 	"github.com/rs/zerolog"
 	"golang.org/x/exp/maps"
 )
@@ -99,9 +99,12 @@ type Detector struct {
 	// IgnoreGitleaksAllow is a flag to ignore gitleaks:allow comments.
 	IgnoreGitleaksAllow bool
 
-	// prefilter is a ahocorasick struct used for doing efficient string
-	// matching given a set of words (keywords from the rules in the config)
-	prefilter *ahocorasick.Matcher
+	// prefilter is an Aho-Corasick trie over the rule keywords, used for
+	// efficient multi-keyword matching against lowercased fragment content.
+	prefilter *ahocorasick.Trie
+	// prefilterRules maps prefilter pattern index -> rule IDs for that
+	// keyword, avoiding per-match string conversion in the hot loop.
+	prefilterRules [][]string
 
 	// ruleGates holds cheap rejection regexes for semi-generic rules; see
 	// rule_gate.go. A fragment that fails a rule's gate cannot match the
@@ -238,13 +241,19 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 		findings:               make([]report.Finding, 0),
 		ValidationCounts:       make(map[report.ValidationStatus]int),
 		Config:                 cfg,
-		prefilter:              ahocorasick.CompileStrings(maps.Keys(cfg.Keywords)),
 		Sema:                   semgroup.NewGroup(ctx, int64(max(40, runtime.NumCPU()*2))),
 		exprRuntime:            exprRuntime,
 		validationRuntime:      validationRuntime,
 		validationPrograms:     make(map[string]exprruntime.Program),
 		filterPrograms:         make(map[string]exprruntime.Program),
 		ValidationExtractEmpty: valOpts.ExtractEmpty,
+	}
+	keywords := maps.Keys(cfg.Keywords)
+	sort.Strings(keywords)
+	d.prefilter = ahocorasick.NewTrieBuilder().AddStrings(keywords).Build()
+	d.prefilterRules = make([][]string, len(keywords))
+	for i, kw := range keywords {
+		d.prefilterRules[i] = cfg.KeywordToRules[kw]
 	}
 	d.rulesBySpecificity = orderedRulesBySpecificity(cfg)
 	d.ruleRank = make(map[string]int, len(d.rulesBySpecificity))
@@ -688,21 +697,18 @@ ScanLoop:
 		case <-ctx.Done():
 			break ScanLoop
 		default:
-			// Use Aho-Corasick to find keyword matches, then map directly
-			// to the rules that need checking via KeywordToRules.
-			// Use a pooled byte buffer for lowercasing to avoid allocating
+			// Use Aho-Corasick to find keyword matches, then map pattern
+			// indices directly to the rules that need checking. Walk is
+			// zero-allocation; the callback fires once per match.
+			// Use a pooled byte buffer for lowercasing to avoid allocating.
 			lowerBufPtr, lowerBuf := getLowerBuf(currentRaw)
-			acMatches := d.prefilter.FindAllByteSlice(lowerBuf)
-
-			// Build a set of rule IDs to check based on keyword matches.
-			rulesToCheck := make(map[string]struct{}, len(acMatches))
-			for _, m := range acMatches {
-				// Inline conversion lets the compiler elide the []byte->string
-				// copy for the map lookup.
-				for _, ruleID := range d.Config.KeywordToRules[string(m.Word)] {
+			rulesToCheck := make(map[string]struct{}, 8)
+			d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
+				for _, ruleID := range d.prefilterRules[pattern] {
 					rulesToCheck[ruleID] = struct{}{}
 				}
-			}
+				return true
+			})
 			putLowerBuf(lowerBufPtr)
 			// Always include rules that have no keywords.
 			for _, ruleID := range d.Config.NoKeywordRules {

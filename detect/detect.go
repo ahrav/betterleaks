@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -235,7 +236,7 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 		findings:               make([]report.Finding, 0),
 		ValidationCounts:       make(map[report.ValidationStatus]int),
 		Config:                 cfg,
-		Sema:                   semgroup.NewGroup(ctx, 40),
+		Sema:                   semgroup.NewGroup(ctx, int64(max(40, runtime.NumCPU()*2))),
 		exprRuntime:            exprRuntime,
 		validationRuntime:      validationRuntime,
 		validationPrograms:     make(map[string]exprruntime.Program),

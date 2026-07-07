@@ -37,7 +37,7 @@ func (s *ParallelGit) workers() int {
 	if s.Workers > 0 {
 		return s.Workers
 	}
-	return min(runtime.NumCPU(), 4)
+	return min(runtime.NumCPU(), 16)
 }
 
 // Fragments implements Source by partitioning commits across
@@ -45,7 +45,11 @@ func (s *ParallelGit) workers() int {
 func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	commits, err := listCommits(ctx, s.RepoPath, s.LogOpts)
 	if err != nil {
-		return fmt.Errorf("list commits: %w", err)
+		// Some --log-opts are valid for `git log` but not `git rev-list`
+		// (e.g. `-n 5` with no ref). Fall back to a single `git log -p`
+		// process, which preserves the exact non-partitioned behavior.
+		logging.Debug().Err(err).Msg("could not enumerate commits; falling back to single git log process")
+		return s.runSingleWorker(ctx, yield)
 	}
 
 	count := len(commits)

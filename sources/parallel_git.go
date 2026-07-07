@@ -30,7 +30,7 @@ type ParallelGit struct {
 	Sema            *semgroup.Group
 	MaxArchiveDepth int
 	LogOpts         string
-	Workers         int // 0 means auto (min(NumCPU, 4))
+	Workers         int // 0 means auto (NumCPU)
 }
 
 func (s *ParallelGit) workers() int {

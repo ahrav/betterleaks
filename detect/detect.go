@@ -131,6 +131,9 @@ type Detector struct {
 	filterProgramM     sync.Mutex
 	filterPrograms     map[string]exprruntime.Program
 	rulesBySpecificity []string
+	// ruleRank maps rule ID to its position in rulesBySpecificity for cheap
+	// specificity-ordered sorting of per-fragment candidate rule sets.
+	ruleRank map[string]int
 
 	// TODO remove this in v2
 	// SkipFindingAppend skips populating the deprecated detector-level findings
@@ -247,6 +250,10 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 		d.prefilterRules[i] = cfg.KeywordToRules[kw]
 	}
 	d.rulesBySpecificity = orderedRulesBySpecificity(cfg)
+	d.ruleRank = make(map[string]int, len(d.rulesBySpecificity))
+	for i, ruleID := range d.rulesBySpecificity {
+		d.ruleRank[ruleID] = i
+	}
 	exprRuntime.SetTokenizerProvider(d.Tokenizer)
 
 	// Compile only global prefilter programs so they are available before scanning.
@@ -727,25 +734,26 @@ ScanLoop:
 }
 
 func (d *Detector) orderedRuleIDs(ruleSet map[string]struct{}) []string {
-	var ruleIDs []string
-	seen := make(map[string]struct{}, len(ruleSet))
-	appendRule := func(ruleID string) {
-		if _, ok := ruleSet[ruleID]; !ok {
-			return
-		}
-		if _, ok := seen[ruleID]; ok {
-			return
-		}
-		seen[ruleID] = struct{}{}
+	// Sorting the (typically small) candidate set by precomputed rank is much
+	// cheaper than walking every configured rule with map lookups per fragment.
+	ruleIDs := make([]string, 0, len(ruleSet))
+	for ruleID := range ruleSet {
 		ruleIDs = append(ruleIDs, ruleID)
 	}
-
-	for _, ruleID := range d.rulesBySpecificity {
-		appendRule(ruleID)
-	}
-	for ruleID := range ruleSet {
-		appendRule(ruleID)
-	}
+	sort.Slice(ruleIDs, func(i, j int) bool {
+		ri, iKnown := d.ruleRank[ruleIDs[i]]
+		rj, jKnown := d.ruleRank[ruleIDs[j]]
+		switch {
+		case iKnown && jKnown:
+			return ri < rj
+		case iKnown:
+			return true
+		case jKnown:
+			return false
+		default:
+			return ruleIDs[i] < ruleIDs[j]
+		}
+	})
 	return ruleIDs
 }
 

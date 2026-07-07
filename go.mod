@@ -5,6 +5,7 @@ go 1.25.0
 toolchain go1.25.10
 
 require (
+	github.com/BobuSumisu/aho-corasick v1.0.3
 	github.com/expr-lang/expr v1.17.8
 	github.com/fatih/semgroup v1.2.0
 	github.com/gitleaks/go-gitdiff v0.9.1
@@ -73,3 +74,5 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/BobuSumisu/aho-corasick => /local/home/ahrav/scratch/aho-corasick

@@ -770,10 +770,18 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 	r config.Rule,
 	encodedSegments []*codec.EncodedSegment,
 	priorFindings []report.Finding) []report.Finding {
-	var (
-		findings []report.Finding
-		logger   = fragment.Logger().With().Str("rule_id", r.RuleID).Logger()
-	)
+	var findings []report.Finding
+
+	// Building a zerolog.Logger allocates; findings are rare relative to
+	// rule checks, so defer construction until a log call is actually made.
+	var lazyLogger *zerolog.Logger
+	logger := func() *zerolog.Logger {
+		if lazyLogger == nil {
+			l := fragment.Logger().With().Str("rule_id", r.RuleID).Logger()
+			lazyLogger = &l
+		}
+		return lazyLogger
+	}
 
 	if r.SkipReport && !fragment.InheritedFromFinding {
 		return findings
@@ -880,7 +888,7 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 		// move to filter?
 		if !d.IgnoreGitleaksAllow && containsAllowSignature(finding.Line) {
-			logger.Trace().
+			logger().Trace().
 				Str("finding", finding.Secret).
 				Msg("skipping finding: allow signature found")
 			continue
@@ -962,13 +970,13 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 		// Global filter: Expr path (attributes + finding).
 		if prg, ok, err := d.globalFilterProgram(); err != nil {
-			logger.Warn().Err(err).Msg("global filter compile error")
+			logger().Warn().Err(err).Msg("global filter compile error")
 		} else if ok {
 			skip, err := d.exprRuntime.EvalFilter(prg, findingMap, fragment.Attributes)
 			if err != nil {
-				logger.Warn().Err(err).Msg("global filter eval error")
+				logger().Warn().Err(err).Msg("global filter eval error")
 			} else if skip {
-				logger.Trace().
+				logger().Trace().
 					Str("finding", finding.Secret).
 					Msg("skipping finding: global filter")
 				continue
@@ -977,13 +985,13 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 		// Rule filter: Expr path (includes entropy, regex/stopword allowlists, tokenEfficiency).
 		if prg, ok, err := d.ruleFilterProgram(r); err != nil {
-			logger.Warn().Err(err).Msg("rule filter compile error")
+			logger().Warn().Err(err).Msg("rule filter compile error")
 		} else if ok {
 			skip, err := d.exprRuntime.EvalFilter(prg, findingMap, fragment.Attributes)
 			if err != nil {
-				logger.Warn().Err(err).Msg("rule filter eval error")
+				logger().Warn().Err(err).Msg("rule filter eval error")
 			} else if skip {
-				logger.Trace().
+				logger().Trace().
 					Str("finding", finding.Secret).
 					Msg("skipping finding: rule filter")
 				continue
@@ -1006,9 +1014,9 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 }
 
 // processRequiredRules handles the logic for multi-part rules with auxiliary findings
-func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw string, r config.Rule, encodedSegments []*codec.EncodedSegment, primaryFindings []report.Finding, logger zerolog.Logger) []report.Finding {
+func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw string, r config.Rule, encodedSegments []*codec.EncodedSegment, primaryFindings []report.Finding, logger func() *zerolog.Logger) []report.Finding {
 	if len(primaryFindings) == 0 {
-		logger.Debug().Msg("no primary findings to process for required rules")
+		logger().Debug().Msg("no primary findings to process for required rules")
 		return primaryFindings
 	}
 
@@ -1018,7 +1026,7 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 	for _, requiredRule := range r.RequiredRules {
 		rule, ok := d.Config.Rules[requiredRule.RuleID]
 		if !ok {
-			logger.Error().Str("rule-id", requiredRule.RuleID).Msg("required rule not found in config")
+			logger().Error().Str("rule-id", requiredRule.RuleID).Msg("required rule not found in config")
 			continue
 		}
 
@@ -1030,7 +1038,7 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, rule, encodedSegments, nil)
 		allRequiredFindings[requiredRule.RuleID] = requiredFindings
 
-		logger.Debug().
+		logger().Debug().
 			Str("rule-id", requiredRule.RuleID).
 			Int("findings", len(requiredFindings)).
 			Msg("collected required rule findings")
@@ -1075,7 +1083,7 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 			newFinding.BuildRequiredSets(requiredFindings, maxRequiredSets)
 			finalFindings = append(finalFindings, newFinding)
 
-			logger.Debug().
+			logger().Debug().
 				Str("primary-rule", r.RuleID).
 				Int("primary-line", primaryFinding.StartLine).
 				Int("auxiliary-count", len(requiredFindings)).

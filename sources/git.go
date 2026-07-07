@@ -67,13 +67,14 @@ func gitConfigIsolationEnv() []string {
 
 	// Diff generation dominates `git log -p` cost on repos with long delta
 	// chains; the default 96 MiB delta-base cache thrashes and re-inflates
-	// the same base objects repeatedly (~40% slower in our measurements).
+	// the same base objects repeatedly (~40% slower in our measurements);
+	// 128m recovers most of the win at modest per-process memory cost.
 	// GIT_CONFIG_* is used instead of `-c` so every git subprocess
 	// (log/diff/cat-file) inherits it without touching each call site.
 	env = append(env,
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=core.deltaBaseCacheLimit",
-		"GIT_CONFIG_VALUE_0=512m",
+		"GIT_CONFIG_VALUE_0=128m",
 	)
 	return env
 }

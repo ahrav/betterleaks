@@ -34,6 +34,12 @@ type compiledProgram struct {
 	tokenizer         *tiktoken.Tiktoken
 	tokenizerProvider func() *tiktoken.Tiktoken
 	bindings          bindings
+
+	// envPool recycles eval-time binding maps. The static entries never
+	// change between evals; only the dynamic keys ("finding", "attributes")
+	// are overwritten per call, so pooling turns the per-eval full map clone
+	// (~10 entries) into at most two assignments.
+	envPool sync.Pool
 }
 
 var emptyStringMap = map[string]string{}
@@ -200,29 +206,48 @@ func (e *Runtime) compileBindings(mode compileMode, tokenizer *tiktoken.Tiktoken
 }
 
 // Compile and runtime bindings expose the same names. Dynamic values are layered
-// onto a shallow copy so compiled programs can share static function bindings.
+// onto a pooled copy so compiled programs can share static function bindings.
 func (e *Runtime) EvalFilter(prg Program, finding, attributes map[string]string) (bool, error) {
 	b := prg.evalBindings()
 	b["finding"] = nonNilStringMap(finding)
 	b["attributes"] = nonNilStringMap(attributes)
-	return runBool(prg, b, "filter")
+	ok, err := runBool(prg, b, "filter")
+	prg.releaseBindings(b)
+	return ok, err
 }
 
 func (e *Runtime) EvalPrefilter(prg Program, attributes map[string]string) (bool, error) {
 	b := prg.evalBindings()
 	b["attributes"] = nonNilStringMap(attributes)
-	return runBool(prg, b, "prefilter")
+	ok, err := runBool(prg, b, "prefilter")
+	prg.releaseBindings(b)
+	return ok, err
 }
 
 func (prg Program) evalBindings() bindings {
-	if prg.bindings != nil {
-		// The clone is shallow: b["__runtime"] still aliases the program's
-		// shared *runtimeBindings. Its tokenizer wiring was resolved at
-		// compile time, so nothing here may write to it — evals run
-		// concurrently across scan workers.
-		return cloneBindings(prg.bindings)
+	if prg.bindings == nil {
+		return bindings{}
 	}
-	return bindings{}
+	if pooled := prg.envPool.Get(); pooled != nil {
+		// Reused maps still hold the static entries plus stale dynamic keys
+		// from the previous eval; every dynamic key is unconditionally
+		// overwritten by the callers above before the VM runs.
+		return pooled.(bindings)
+	}
+	// The clone is shallow: b["__runtime"] still aliases the program's
+	// shared *runtimeBindings. Its tokenizer wiring was resolved at
+	// compile time, so nothing here may write to it — evals run
+	// concurrently across scan workers.
+	return cloneBindings(prg.bindings)
+}
+
+// releaseBindings recycles an eval env map. The expr VM does not retain the
+// env after Run returns, so handing it to the next eval is safe.
+func (prg Program) releaseBindings(b bindings) {
+	if prg.bindings == nil {
+		return
+	}
+	prg.envPool.Put(b)
 }
 
 func cloneBindings(src bindings) bindings {

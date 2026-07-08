@@ -266,11 +266,16 @@ func putLowerBuf(bp *[]byte) {
 	lowercaseBufPool.Put(bp)
 }
 
-// findNewlineIndices returns the start indices of all newlines in s.
+// findNewlineIndices returns the byte offsets of all newlines in s.
 // This replaces the previous regex-based approach which was expensive
 // when using go-re2 (WASM overhead for a literal \n search).
-func findNewlineIndices(s string) [][]int {
-	indices := make([][]int, 0, strings.Count(s, "\n"))
+//
+// A flat []int of offsets is returned rather than [][]int pairs: location()
+// only ever reads the newline offset, so pairing it with offset+1 allocated a
+// tiny slice per newline (hundreds of thousands over a large scan) for a value
+// nothing consumed.
+func findNewlineIndices(s string) []int {
+	indices := make([]int, 0, strings.Count(s, "\n"))
 	offset := 0
 	for {
 		i := strings.IndexByte(s[offset:], '\n')
@@ -278,7 +283,7 @@ func findNewlineIndices(s string) [][]int {
 			break
 		}
 		idx := offset + i
-		indices = append(indices, []int{idx, idx + 1})
+		indices = append(indices, idx)
 		offset = idx + 1
 	}
 	return indices

@@ -76,7 +76,30 @@ func gitConfigIsolationEnv() []string {
 		"GIT_CONFIG_KEY_0=core.deltaBaseCacheLimit",
 		"GIT_CONFIG_VALUE_0=128m",
 	)
+
+	// git's history-scan CPU is dominated by zlib inflate. zlib-ng (built
+	// with ZLIB_COMPAT) produces byte-identical streams ~15% faster
+	// end-to-end on `git log -p`. Opt in by pointing BETTERLEAKS_GIT_ZLIB
+	// at a compat libz; it is injected only into git subprocess
+	// environments, never the scanner's own process.
+	if lib := os.Getenv("BETTERLEAKS_GIT_ZLIB"); lib != "" {
+		if _, err := os.Stat(lib); err == nil {
+			env = setEnvVar(env, "LD_PRELOAD", lib)
+		}
+	}
 	return env
+}
+
+// setEnvVar replaces key's value in env or appends it when absent.
+func setEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 // blobReader provides a ReadCloser interface git cat-file blob to fetch

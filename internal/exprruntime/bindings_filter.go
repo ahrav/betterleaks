@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/betterleaks/betterleaks/internal/words"
 	blregexp "github.com/betterleaks/betterleaks/regexp"
@@ -15,7 +16,33 @@ import (
 var (
 	regexCache  sync.Map // string -> *blregexp.Regexp
 	acTrieCache sync.Map // string -> *ahocorasick.Matcher
+
+	// Pattern lists reaching matchesAny/containsAny are almost always expr
+	// VM constants: the same []any backing array is passed on every eval.
+	// Memoizing by that array's identity skips the per-call []string
+	// conversion and joined-key construction entirely.
+	regexByListID  sync.Map // unsafe.Pointer -> listCacheEntry[*blregexp.Regexp]
+	acTrieByListID sync.Map // unsafe.Pointer -> listCacheEntry[*ahocorasick.Matcher]
 )
+
+// listCacheEntry pins the cached list so its backing array can never be
+// freed and its address reused by a different list, which is what makes
+// keying by backing-array pointer sound. The length guards against distinct
+// prefix-slices of one array (same base, different len).
+type listCacheEntry[T any] struct {
+	list     []any
+	compiled T
+}
+
+// listIdentity returns a stable identity for a non-empty []any: the pointer
+// to its backing array.
+func listIdentity(v any) (unsafe.Pointer, bool) {
+	ss, ok := v.([]any)
+	if !ok || len(ss) == 0 {
+		return nil, false
+	}
+	return unsafe.Pointer(unsafe.SliceData(ss)), true
+}
 
 func filterNamespace(rt *runtimeBindings) map[string]any {
 	return map[string]any{
@@ -69,12 +96,36 @@ func getOrBuildTrie(terms []string) *ahocorasick.Matcher {
 }
 
 func matchesAny(s string, patterns any) bool {
+	if id, ok := listIdentity(patterns); ok {
+		if v, hit := regexByListID.Load(id); hit {
+			e := v.(listCacheEntry[*blregexp.Regexp])
+			if len(e.list) == len(patterns.([]any)) {
+				return e.compiled != nil && e.compiled.MatchString(s)
+			}
+		}
+		re := getOrCompileJoinedRegex(toStringSlice(patterns))
+		regexByListID.Store(id, listCacheEntry[*blregexp.Regexp]{list: patterns.([]any), compiled: re})
+		return re != nil && re.MatchString(s)
+	}
 	re := getOrCompileJoinedRegex(toStringSlice(patterns))
 	return re != nil && re.MatchString(s)
 }
 
 func containsAny(s string, terms any) bool {
-	trie := getOrBuildTrie(toStringSlice(terms))
+	var trie *ahocorasick.Matcher
+	if id, ok := listIdentity(terms); ok {
+		if v, hit := acTrieByListID.Load(id); hit {
+			e := v.(listCacheEntry[*ahocorasick.Matcher])
+			if len(e.list) == len(terms.([]any)) {
+				trie = e.compiled
+				return trie != nil && len(trie.FindAllString(strings.ToLower(s))) > 0
+			}
+		}
+		trie = getOrBuildTrie(toStringSlice(terms))
+		acTrieByListID.Store(id, listCacheEntry[*ahocorasick.Matcher]{list: terms.([]any), compiled: trie})
+	} else {
+		trie = getOrBuildTrie(toStringSlice(terms))
+	}
 	return trie != nil && len(trie.FindAllString(strings.ToLower(s))) > 0
 }
 

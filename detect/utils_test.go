@@ -193,3 +193,61 @@ func Test_createScmLink(t *testing.T) {
 		})
 	}
 }
+
+// scalarASCIILower is the obviously-correct reference the SWAR asciiLower must
+// match byte-for-byte.
+func scalarASCIILower(dst []byte, s string) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			dst[i] = c + 32
+		} else {
+			dst[i] = c
+		}
+	}
+}
+
+// TestAsciiLowerEquivalence proves the branchless SWAR asciiLower is byte-exact
+// against the scalar reference. It stresses the two failure modes of SWAR byte
+// arithmetic: cross-byte borrow/carry (adjacency sweep) and the ASCII boundary
+// (all 256 byte values, including >= 0x80 which must pass through unchanged).
+func TestAsciiLowerEquivalence(t *testing.T) {
+	check := func(in []byte) {
+		want := make([]byte, len(in))
+		got := make([]byte, len(in))
+		scalarASCIILower(want, string(in))
+		asciiLower(got, string(in))
+		assert.Equal(t, want, got, "input %x", in)
+	}
+
+	// Every byte value, alone and length-padded, exercising all 8 lane offsets
+	// plus the scalar remainder for non-multiple-of-8 lengths.
+	for v := 0; v < 256; v++ {
+		for _, n := range []int{1, 7, 8, 9, 15, 16, 17} {
+			for off := 0; off < n; off++ {
+				buf := make([]byte, n)
+				for k := range buf {
+					buf[k] = 0xFF // hostile background stresses borrow propagation
+				}
+				buf[off] = byte(v)
+				check(buf)
+			}
+		}
+	}
+
+	// All adjacency pairs at every offset in a full 8-byte word: catches any
+	// borrow leaking from one byte's range test into its neighbour.
+	for a := 0; a < 256; a++ {
+		for b := 0; b < 256; b++ {
+			for pos := 0; pos < 7; pos++ {
+				buf := make([]byte, 8)
+				buf[pos] = byte(a)
+				buf[pos+1] = byte(b)
+				check(buf)
+			}
+		}
+	}
+
+	// Empty input must be a no-op.
+	check(nil)
+}

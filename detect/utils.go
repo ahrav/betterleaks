@@ -250,16 +250,64 @@ func getLowerBuf(s string) (*[]byte, []byte) {
 	} else {
 		buf = buf[:len(s)]
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			buf[i] = c + 32
-		} else {
-			buf[i] = c
-		}
-	}
+	asciiLower(buf, s)
 	*bp = buf
 	return bp, buf
+}
+
+// SWAR lane masks for asciiLower: one 0x01 / 0x80 / 0x7F per byte of a uint64.
+const (
+	swarOnes = 0x0101010101010101
+	swarHigh = 0x8080808080808080
+	swarLow7 = 0x7f7f7f7f7f7f7f7f
+)
+
+// asciiLower writes an ASCII-lowercased copy of s into dst (len(dst) == len(s)):
+// bytes 'A'..'Z' gain 0x20, all others (including any byte >= 0x80) pass
+// through unchanged. Eight bytes are folded per iteration with branchless SWAR;
+// see the exhaustive equivalence proof in the package tests.
+//
+// Per byte b, gtByte(x,hi) sets bit7 where (b & 0x7f) > hi without borrowing
+// across byte boundaries. The A–Z mask is (>0x40) AND NOT (>0x5A) AND (b <
+// 0x80); shifting it right by 2 turns each qualifying 0x80 into the 0x20 to add.
+func asciiLower(dst []byte, s string) {
+	i, n := 0, len(s)
+	for ; i+8 <= n; i += 8 {
+		x := leUint64(s[i:])
+		notHigh := ^x & swarHigh
+		gt40 := ((x & swarLow7) + (swarLow7 - swarOnes*0x40)) & swarHigh
+		gt5A := ((x & swarLow7) + (swarLow7 - swarOnes*0x5A)) & swarHigh
+		mask := gt40 &^ gt5A & notHigh
+		putLEUint64(dst[i:], x+(mask>>2))
+	}
+	for ; i < n; i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			dst[i] = c + 32
+		} else {
+			dst[i] = c
+		}
+	}
+}
+
+// leUint64 reads 8 bytes of s as a little-endian uint64. s must have len >= 8.
+func leUint64(s string) uint64 {
+	_ = s[7]
+	return uint64(s[0]) | uint64(s[1])<<8 | uint64(s[2])<<16 | uint64(s[3])<<24 |
+		uint64(s[4])<<32 | uint64(s[5])<<40 | uint64(s[6])<<48 | uint64(s[7])<<56
+}
+
+// putLEUint64 writes x as little-endian bytes into b. b must have len >= 8.
+func putLEUint64(b []byte, x uint64) {
+	_ = b[7]
+	b[0] = byte(x)
+	b[1] = byte(x >> 8)
+	b[2] = byte(x >> 16)
+	b[3] = byte(x >> 24)
+	b[4] = byte(x >> 32)
+	b[5] = byte(x >> 40)
+	b[6] = byte(x >> 48)
+	b[7] = byte(x >> 56)
 }
 
 func putLowerBuf(bp *[]byte) {

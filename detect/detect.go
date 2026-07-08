@@ -495,14 +495,17 @@ func (d *Detector) Run(ctx context.Context, source sources.Source) iter.Seq[Resu
 					return emit(Result{Err: err})
 				}
 
-				logger := fragment.Logger()
+				// Building the enriched logger allocates per fragment; only
+				// construct it on the rare paths that actually log.
 				if len(fragment.Raw) == 0 && fragment.Attr(sources.AttrPath) == "" {
-					logger.Trace().Msg("skipping empty fragment")
+					l := fragment.Logger()
+					l.Trace().Msg("skipping empty fragment")
 					return nil
 				}
 
 				var timer *time.Timer
-				if logger.GetLevel() <= zerolog.DebugLevel {
+				if logging.Logger.GetLevel() <= zerolog.DebugLevel {
+					logger := fragment.Logger()
 					timer = time.AfterFunc(SlowWarningThreshold, func() {
 						logger.Debug().Msgf("Taking longer than %s to inspect fragment", SlowWarningThreshold.String())
 					})

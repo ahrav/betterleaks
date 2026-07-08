@@ -154,6 +154,14 @@ func (e *Runtime) compile(mode compileMode, expression string, tokenizer *tiktok
 		tokenizerProvider: e.tokenizerProvider,
 		bindings:          programBindings(mode, b),
 	}
+	// Filter/prefilter programs embed a *runtimeBindings that eval-time
+	// closures (failsTokenEfficiency, filter namespace) capture. Resolve its
+	// tokenizer wiring once here: evals run concurrently and must never
+	// mutate this shared struct.
+	if rt, ok := prg.bindings["__runtime"].(*runtimeBindings); ok {
+		rt.tokenizer = tokenizer
+		rt.tokenizerProvider = e.tokenizerProvider
+	}
 
 	e.mu.Lock()
 	e.cache[cacheKey] = prg
@@ -208,12 +216,11 @@ func (e *Runtime) EvalPrefilter(prg Program, attributes map[string]string) (bool
 
 func (prg Program) evalBindings() bindings {
 	if prg.bindings != nil {
-		b := cloneBindings(prg.bindings)
-		if rt, ok := b["__runtime"].(*runtimeBindings); ok {
-			rt.tokenizer = prg.tokenizer
-			rt.tokenizerProvider = prg.tokenizerProvider
-		}
-		return b
+		// The clone is shallow: b["__runtime"] still aliases the program's
+		// shared *runtimeBindings. Its tokenizer wiring was resolved at
+		// compile time, so nothing here may write to it — evals run
+		// concurrently across scan workers.
+		return cloneBindings(prg.bindings)
 	}
 	return bindings{}
 }

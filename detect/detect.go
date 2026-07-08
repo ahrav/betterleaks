@@ -726,7 +726,10 @@ func (d *Detector) detectFragment(ctx context.Context, fragment sources.Fragment
 	currentRaw := fragment.Raw
 	encodedSegments := []*codec.EncodedSegment{}
 	currentDecodeDepth := 0
-	decoder := codec.NewDecoder()
+	// The decoder's memo map lives only for this fragment's decode passes;
+	// recycle it through a pool to avoid a per-fragment map allocation.
+	decoder := codec.GetDecoder()
+	defer codec.PutDecoder(decoder)
 
 ScanLoop:
 	for {

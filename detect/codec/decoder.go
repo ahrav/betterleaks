@@ -2,6 +2,7 @@ package codec
 
 import (
 	"bytes"
+	"sync"
 
 	"github.com/betterleaks/betterleaks/logging"
 )
@@ -16,6 +17,26 @@ func NewDecoder() *Decoder {
 	return &Decoder{
 		decodedMap: make(map[string]string),
 	}
+}
+
+// decoderPool recycles Decoders across fragments. The decodedMap is only a
+// per-fragment memo (it lives no longer than one Decode loop), so a pooled
+// Decoder whose map is cleared between uses is semantically identical to a
+// freshly allocated one — it just avoids the per-fragment map allocation.
+var decoderPool = sync.Pool{
+	New: func() any { return &Decoder{decodedMap: make(map[string]string)} },
+}
+
+// GetDecoder returns a reset Decoder from the pool. Pair every call with
+// PutDecoder once the fragment's decode passes are complete.
+func GetDecoder() *Decoder {
+	return decoderPool.Get().(*Decoder)
+}
+
+// PutDecoder clears d and returns it to the pool. d must not be used after.
+func PutDecoder(d *Decoder) {
+	clear(d.decodedMap)
+	decoderPool.Put(d)
 }
 
 // Decode returns the data with the values decoded in place along with the

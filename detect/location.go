@@ -10,7 +10,7 @@ type Location struct {
 	endLineIndex   int
 }
 
-func location(newlineIndices [][]int, raw string, matchIndex []int) Location {
+func location(newlineIndices []int, raw string, matchIndex []int) Location {
 	var (
 		prevNewLine int
 		location    Location
@@ -29,14 +29,11 @@ func location(newlineIndices [][]int, raw string, matchIndex []int) Location {
 	// will be counted to make the subsequent location calculation logic work
 	// for fragments will no newlines.
 	if len(newlineIndices) == 0 {
-		newlineIndices = [][]int{
-			{len(raw), len(raw) + 1},
-		}
+		newlineIndices = []int{len(raw)}
 	}
 
-	for lineNum, pair := range newlineIndices {
+	for lineNum, newLineByteIndex := range newlineIndices {
 		_lineNum = lineNum
-		newLineByteIndex := pair[0]
 		if prevNewLine <= start && start < newLineByteIndex {
 			lineSet = true
 			location.startLine = lineNum
@@ -51,7 +48,7 @@ func location(newlineIndices [][]int, raw string, matchIndex []int) Location {
 			location.endLineIndex = newLineByteIndex
 		}
 
-		prevNewLine = pair[0]
+		prevNewLine = newLineByteIndex
 	}
 
 	if !lineSet {

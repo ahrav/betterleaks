@@ -898,7 +898,7 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 	}
 
 	// Lazily compute newline indices — only when we actually need location info.
-	var newlineIndices [][]int
+	var newlineIndices []int
 	newlineComputed := false
 
 	// Reuse the matches slice from above instead of calling FindAllStringIndex again.

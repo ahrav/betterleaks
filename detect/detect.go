@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,6 +141,16 @@ type Detector struct {
 	// ruleRank maps rule ID to its position in rulesBySpecificity for cheap
 	// specificity-ordered sorting of per-fragment candidate rule sets.
 	ruleRank map[string]int
+	// prefilterRuleRanks mirrors prefilterRules but stores each keyword's rule
+	// IDs pre-resolved to their specificity rank, so the hot loop can collect
+	// candidates as dense ints (dedupe + order via a pooled scratch) instead of
+	// allocating a map[string]struct{} and a []string sort per fragment.
+	prefilterRuleRanks [][]int
+	// noKeywordRuleRanks holds the ranks of rules that have no keywords and
+	// must always be considered.
+	noKeywordRuleRanks []int
+	// candidatePool recycles the per-fragment candidate-collection scratch.
+	candidatePool sync.Pool
 
 	// TODO remove this in v2
 	// SkipFindingAppend skips populating the deprecated detector-level findings
@@ -259,6 +270,29 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 	d.ruleRank = make(map[string]int, len(d.rulesBySpecificity))
 	for i, ruleID := range d.rulesBySpecificity {
 		d.ruleRank[ruleID] = i
+	}
+
+	// Pre-resolve keyword->rule and no-keyword rule lists to specificity ranks
+	// so the per-fragment hot loop never touches the ruleRank map or allocates.
+	numRules := len(d.rulesBySpecificity)
+	d.prefilterRuleRanks = make([][]int, len(d.prefilterRules))
+	for i, ruleIDs := range d.prefilterRules {
+		ranks := make([]int, 0, len(ruleIDs))
+		for _, ruleID := range ruleIDs {
+			if r, ok := d.ruleRank[ruleID]; ok {
+				ranks = append(ranks, r)
+			}
+		}
+		d.prefilterRuleRanks[i] = ranks
+	}
+	d.noKeywordRuleRanks = make([]int, 0, len(cfg.NoKeywordRules))
+	for _, ruleID := range cfg.NoKeywordRules {
+		if r, ok := d.ruleRank[ruleID]; ok {
+			d.noKeywordRuleRanks = append(d.noKeywordRuleRanks, r)
+		}
+	}
+	d.candidatePool.New = func() any {
+		return &candidateScratch{seen: make([]bool, numRules)}
 	}
 	rulePatterns := make(map[string]string, len(cfg.Rules))
 	for ruleID, r := range cfg.Rules {
@@ -703,30 +737,50 @@ ScanLoop:
 			// Use Aho-Corasick to find keyword matches, then map pattern
 			// indices directly to the rules that need checking. Walk is
 			// zero-allocation; the callback fires once per match.
+			// Candidates are collected as dense specificity ranks into a
+			// pooled scratch (dedupe via a bool array, order via a sorted int
+			// slice) so no per-fragment map or []string sort is allocated.
 			// Use a pooled byte buffer for lowercasing to avoid allocating.
+			scratch := d.candidatePool.Get().(*candidateScratch)
 			lowerBufPtr, lowerBuf := getLowerBuf(currentRaw)
-			rulesToCheck := make(map[string]struct{}, 8)
 			d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
-				for _, ruleID := range d.prefilterRules[pattern] {
-					rulesToCheck[ruleID] = struct{}{}
+				for _, rank := range d.prefilterRuleRanks[pattern] {
+					if !scratch.seen[rank] {
+						scratch.seen[rank] = true
+						scratch.ranks = append(scratch.ranks, rank)
+					}
 				}
 				return true
 			})
 			putLowerBuf(lowerBufPtr)
 			// Always include rules that have no keywords.
-			for _, ruleID := range d.Config.NoKeywordRules {
-				rulesToCheck[ruleID] = struct{}{}
+			for _, rank := range d.noKeywordRuleRanks {
+				if !scratch.seen[rank] {
+					scratch.seen[rank] = true
+					scratch.ranks = append(scratch.ranks, rank)
+				}
 			}
 
-			ruleIDs := d.orderedRuleIDs(rulesToCheck)
-			for _, ruleID := range ruleIDs {
+			// Evaluate rules in specificity-rank order (ascending), matching
+			// the previous orderedRuleIDs contract exactly.
+			slices.Sort(scratch.ranks)
+			cancelled := false
+			for _, rank := range scratch.ranks {
 				select {
 				case <-ctx.Done():
-					break ScanLoop
+					cancelled = true
 				default:
-					rule := d.Config.Rules[ruleID]
+					rule := d.Config.Rules[d.rulesBySpecificity[rank]]
 					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings)...)
 				}
+				if cancelled {
+					break
+				}
+			}
+			scratch.reset()
+			d.candidatePool.Put(scratch)
+			if cancelled {
+				break ScanLoop
 			}
 
 			// increment the depth by 1 as we start our decoding pass
@@ -749,28 +803,22 @@ ScanLoop:
 	return filter(findings)
 }
 
-func (d *Detector) orderedRuleIDs(ruleSet map[string]struct{}) []string {
-	// Sorting the (typically small) candidate set by precomputed rank is much
-	// cheaper than walking every configured rule with map lookups per fragment.
-	ruleIDs := make([]string, 0, len(ruleSet))
-	for ruleID := range ruleSet {
-		ruleIDs = append(ruleIDs, ruleID)
+// candidateScratch is the pooled per-fragment scratch for collecting the set
+// of candidate rules (as specificity ranks) without allocating a map or a
+// sorted []string each fragment. seen provides O(1) dedupe keyed by rank;
+// ranks accumulates the distinct hits for in-order evaluation.
+type candidateScratch struct {
+	seen  []bool
+	ranks []int
+}
+
+// reset clears the marks for the ranks touched this fragment and empties the
+// collection slice, keeping both backing arrays for reuse.
+func (s *candidateScratch) reset() {
+	for _, rank := range s.ranks {
+		s.seen[rank] = false
 	}
-	sort.Slice(ruleIDs, func(i, j int) bool {
-		ri, iKnown := d.ruleRank[ruleIDs[i]]
-		rj, jKnown := d.ruleRank[ruleIDs[j]]
-		switch {
-		case iKnown && jKnown:
-			return ri < rj
-		case iKnown:
-			return true
-		case jKnown:
-			return false
-		default:
-			return ruleIDs[i] < ruleIDs[j]
-		}
-	})
-	return ruleIDs
+	s.ranks = s.ranks[:0]
 }
 
 func orderedRulesBySpecificity(cfg *config.Config) []string {

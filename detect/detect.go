@@ -950,6 +950,12 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 			tags = append(append([]string(nil), r.Tags...), metaTags...)
 		}
 
+		// Clone the retained substrings: findings live until reporting, and
+		// slicing them out of fragment.Raw would otherwise pin the whole
+		// fragment buffer (in pack mode, the entire underlying blob) in
+		// memory. Findings are rare relative to fragments, so the copies
+		// are negligible CPU.
+		secret = strings.Clone(secret)
 		finding := report.Finding{
 			RuleID:          r.RuleID,
 			Description:     r.Description,
@@ -957,7 +963,7 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 			EndLine:         fragment.StartLine + loc.endLine,
 			StartColumn:     loc.startColumn,
 			EndColumn:       loc.endColumn,
-			Line:            fragment.Raw[loc.startLineIndex:loc.endLineIndex],
+			Line:            strings.Clone(fragment.Raw[loc.startLineIndex:loc.endLineIndex]),
 			Match:           secret,
 			Secret:          secret,
 			Attributes:      maps.Clone(fragment.Attributes),

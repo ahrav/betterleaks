@@ -142,3 +142,31 @@ func TestDecode(t *testing.T) {
 		})
 	}
 }
+
+// TestPooledDecoderHygiene guards the clear() in PutDecoder: a decoder
+// returned to the pool must come back with an empty memo, so one fragment's
+// decoded values can never leak into another fragment's decode passes.
+func TestPooledDecoderHygiene(t *testing.T) {
+	d := GetDecoder()
+
+	// Populate the memo with a real decode (base64 of "supersecretvalue1").
+	data := `token = "c3VwZXJzZWNyZXR2YWx1ZTE="`
+	decoded, segments := d.Decode(data, nil)
+	if len(segments) == 0 || decoded == data {
+		t.Fatalf("fixture did not decode: %q -> %q (segments=%d)", data, decoded, len(segments))
+	}
+	if len(d.decodedMap) == 0 {
+		t.Fatal("decode did not populate the memo; hygiene test is vacuous")
+	}
+
+	PutDecoder(d)
+
+	// The pool is per-P LIFO, so an immediate Get on the same goroutine
+	// returns the same instance in practice; assert emptiness regardless of
+	// which instance comes back — the invariant is pool-wide.
+	d2 := GetDecoder()
+	defer PutDecoder(d2)
+	if n := len(d2.decodedMap); n != 0 {
+		t.Fatalf("pooled decoder memo not cleared: %d stale entries", n)
+	}
+}

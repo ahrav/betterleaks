@@ -155,14 +155,14 @@ func (p *fastLogParser) parseCommitHeader() {
 				h.Author = &ident
 			}
 		case bytes.HasPrefix(line, []byte("AuthorDate:")):
-			d, err := gitdiff.ParsePatchDate(strings.TrimSpace(string(line[len("AuthorDate:"):])))
+			d, err := parseGitLogDate(strings.TrimSpace(string(line[len("AuthorDate:"):])))
 			if err != nil {
 				hdrErr = err
 			} else {
 				h.AuthorDate = d
 			}
 		case bytes.HasPrefix(line, []byte("Date:")):
-			d, err := gitdiff.ParsePatchDate(strings.TrimSpace(string(line[len("Date:"):])))
+			d, err := parseGitLogDate(strings.TrimSpace(string(line[len("Date:"):])))
 			if err != nil {
 				hdrErr = err
 			} else {
@@ -176,7 +176,7 @@ func (p *fastLogParser) parseCommitHeader() {
 				h.Committer = &ident
 			}
 		case bytes.HasPrefix(line, []byte("CommitDate:")):
-			d, err := gitdiff.ParsePatchDate(strings.TrimSpace(string(line[len("CommitDate:"):])))
+			d, err := parseGitLogDate(strings.TrimSpace(string(line[len("CommitDate:"):])))
 			if err != nil {
 				hdrErr = err
 			} else {
@@ -268,16 +268,147 @@ func (p *fastLogParser) setHeader(h *gitdiff.PatchHeader, err error) {
 	p.header = h
 }
 
-// parseGitDefaultDate parses a Date: header value. Delegates to
-// gitdiff.ParsePatchDate so all its accepted layouts (default, iso, rfc,
-// unix, raw) behave identically; this runs once per commit, not per line,
-// so the layout cascade is not a hot path.
-func parseGitDefaultDate(s string) time.Time {
-	t, err := gitdiff.ParsePatchDate(s)
-	if err != nil {
-		return time.Time{}
+func parseGitLogDate(s string) (time.Time, error) {
+	if t, ok := parseGitDefaultDate(s); ok {
+		return t, nil
 	}
-	return t
+	return gitdiff.ParsePatchDate(s)
+}
+
+func parseGitDefaultDate(s string) (time.Time, bool) {
+	// Git's default pretty date is "Mon Jan 2 15:04:05 2006 -0700".
+	// Go's parser also accepts space- and zero-padded days for this layout;
+	// keep the same shape here and leave uncommon layouts to gitdiff.
+	if len(s) < 29 || len(s) > 31 || s[3] != ' ' || s[7] != ' ' {
+		return time.Time{}, false
+	}
+
+	month, ok := parseGitMonth(s[4:7])
+	if !ok {
+		return time.Time{}, false
+	}
+
+	pos := 8
+	if s[pos] == ' ' {
+		pos++
+	}
+	if pos >= len(s) || !isASCIIDigit(s[pos]) {
+		return time.Time{}, false
+	}
+	day := int(s[pos] - '0')
+	pos++
+	if pos < len(s) && isASCIIDigit(s[pos]) {
+		day = day*10 + int(s[pos]-'0')
+		pos++
+	}
+	if pos >= len(s) || s[pos] != ' ' {
+		return time.Time{}, false
+	}
+	pos++
+
+	if pos+19 != len(s) || s[pos+2] != ':' || s[pos+5] != ':' || s[pos+8] != ' ' || s[pos+13] != ' ' {
+		return time.Time{}, false
+	}
+	hour, ok := parseTwoDigits(s[pos:])
+	if !ok {
+		return time.Time{}, false
+	}
+	minute, ok := parseTwoDigits(s[pos+3:])
+	if !ok {
+		return time.Time{}, false
+	}
+	second, ok := parseTwoDigits(s[pos+6:])
+	if !ok {
+		return time.Time{}, false
+	}
+	year, ok := parseFourDigits(s[pos+9:])
+	if !ok {
+		return time.Time{}, false
+	}
+	zoneSign := s[pos+14]
+	if zoneSign != '+' && zoneSign != '-' {
+		return time.Time{}, false
+	}
+	zoneHour, ok := parseTwoDigits(s[pos+15:])
+	if !ok {
+		return time.Time{}, false
+	}
+	zoneMinute, ok := parseTwoDigits(s[pos+17:])
+	if !ok {
+		return time.Time{}, false
+	}
+
+	if day < 1 || day > daysInMonth(year, month) || hour > 23 || minute > 59 || second > 59 || zoneHour > 23 || zoneMinute > 59 {
+		return time.Time{}, false
+	}
+	offset := zoneHour*3600 + zoneMinute*60
+	if zoneSign == '-' {
+		offset = -offset
+	}
+	return time.Date(year, time.Month(month), day, hour, minute, second, 0, time.FixedZone("", offset)), true
+}
+
+func parseGitMonth(s string) (int, bool) {
+	switch s {
+	case "Jan":
+		return 1, true
+	case "Feb":
+		return 2, true
+	case "Mar":
+		return 3, true
+	case "Apr":
+		return 4, true
+	case "May":
+		return 5, true
+	case "Jun":
+		return 6, true
+	case "Jul":
+		return 7, true
+	case "Aug":
+		return 8, true
+	case "Sep":
+		return 9, true
+	case "Oct":
+		return 10, true
+	case "Nov":
+		return 11, true
+	case "Dec":
+		return 12, true
+	default:
+		return 0, false
+	}
+}
+
+func parseTwoDigits(s string) (int, bool) {
+	if len(s) < 2 || !isASCIIDigit(s[0]) || !isASCIIDigit(s[1]) {
+		return 0, false
+	}
+	return int(s[0]-'0')*10 + int(s[1]-'0'), true
+}
+
+func parseFourDigits(s string) (int, bool) {
+	if len(s) < 4 || !isASCIIDigit(s[0]) || !isASCIIDigit(s[1]) || !isASCIIDigit(s[2]) || !isASCIIDigit(s[3]) {
+		return 0, false
+	}
+	return int(s[0]-'0')*1000 + int(s[1]-'0')*100 + int(s[2]-'0')*10 + int(s[3]-'0'), true
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+func daysInMonth(year, month int) int {
+	switch month {
+	case 4, 6, 9, 11:
+		return 30
+	case 2:
+		if year%4 == 0 && (year%100 != 0 || year%400 == 0) {
+			return 29
+		}
+		return 28
+	default:
+		return 31
+	}
 }
 
 // parseFileDiff consumes one `diff --git` block: extended headers, then
@@ -290,39 +421,33 @@ func (p *fastLogParser) parseFileDiff() {
 	p.readLine()
 
 	// Extended header lines.
-	var oldName, newName string
-	hasDefaultNameFallback := false
+	var newName string
 	for p.line != nil {
 		line := chompNL(p.line)
-		s := string(line)
 		switch {
-		case strings.HasPrefix(s, "@@ -"):
+		case bytes.HasPrefix(line, []byte("@@ -")):
 			goto hunks
-		case strings.HasPrefix(s, "--- "):
-			oldName = parseAbName(s[4:])
-			_ = oldName
-		case strings.HasPrefix(s, "+++ "):
-			newName = parseAbName(s[4:])
-		case strings.HasPrefix(s, "new file mode "):
+		case bytes.HasPrefix(line, []byte("--- ")):
+			// consumed; betterleaks only uses NewName
+		case bytes.HasPrefix(line, []byte("+++ ")):
+			newName = parseAbName(string(line[4:]))
+		case bytes.HasPrefix(line, []byte("new file mode ")):
 			f.IsNew = true
-			hasDefaultNameFallback = true
-		case strings.HasPrefix(s, "deleted file mode "):
+		case bytes.HasPrefix(line, []byte("deleted file mode ")):
 			f.IsDelete = true
-			hasDefaultNameFallback = true
-		case strings.HasPrefix(s, "rename to "):
+		case bytes.HasPrefix(line, []byte("rename to ")):
 			f.IsRename = true
-			newName = unquoteName(s[len("rename to "):])
-		case strings.HasPrefix(s, "copy to "):
+			newName = unquoteName(string(line[len("rename to "):]))
+		case bytes.HasPrefix(line, []byte("copy to ")):
 			f.IsCopy = true
-			newName = unquoteName(s[len("copy to "):])
-		case strings.HasPrefix(s, "rename from "), strings.HasPrefix(s, "copy from "),
-			strings.HasPrefix(s, "old mode "), strings.HasPrefix(s, "new mode "),
-			strings.HasPrefix(s, "similarity index "), strings.HasPrefix(s, "dissimilarity index "),
-			strings.HasPrefix(s, "index "):
+			newName = unquoteName(string(line[len("copy to "):]))
+		case bytes.HasPrefix(line, []byte("rename from ")), bytes.HasPrefix(line, []byte("copy from ")),
+			bytes.HasPrefix(line, []byte("old mode ")), bytes.HasPrefix(line, []byte("new mode ")),
+			bytes.HasPrefix(line, []byte("similarity index ")), bytes.HasPrefix(line, []byte("dissimilarity index ")),
+			bytes.HasPrefix(line, []byte("index ")):
 			// consumed; carries no data betterleaks uses
-			hasDefaultNameFallback = hasDefaultNameFallback || strings.HasPrefix(s, "old mode ")
-		case strings.HasPrefix(s, "Binary files ") && strings.HasSuffix(s, "differ"),
-			s == "GIT binary patch", s == "Binary files differ":
+		case bytes.HasPrefix(line, []byte("Binary files ")) && bytes.HasSuffix(line, []byte("differ")),
+			bytes.Equal(line, []byte("GIT binary patch")), bytes.Equal(line, []byte("Binary files differ")):
 			f.IsBinary = true
 			p.readLine()
 			p.finishFile(f, newName, defaultName)
@@ -347,7 +472,6 @@ hunks:
 		}
 		f.TextFragments = append(f.TextFragments, frag)
 	}
-	_ = hasDefaultNameFallback
 	p.finishFile(f, newName, defaultName)
 }
 
@@ -410,9 +534,16 @@ func (p *fastLogParser) parseHunk() *gitdiff.TextFragment {
 		NewLines:    newCount,
 	}
 
-	var added bytes.Buffer
+	var added strings.Builder
 	oldLeft, newLeft := oldCount, newCount
 	lastWasAdd := false
+	pendingAddNewline := false
+	flushPendingAddNewline := func() {
+		if pendingAddNewline {
+			added.WriteByte('\n')
+			pendingAddNewline = false
+		}
+	}
 
 	p.readLine()
 	for (oldLeft > 0 || newLeft > 0) && p.line != nil {
@@ -421,22 +552,33 @@ func (p *fastLogParser) parseHunk() *gitdiff.TextFragment {
 		switch op {
 		case '+':
 			newLeft--
-			added.Write(line[1:])
+			flushPendingAddNewline()
+			payload := line[1:]
+			if n := len(payload); n > 0 && payload[n-1] == '\n' {
+				added.Write(payload[:n-1])
+				pendingAddNewline = true
+			} else {
+				added.Write(payload)
+			}
 			lastWasAdd = true
 		case '-':
+			flushPendingAddNewline()
 			oldLeft--
 			lastWasAdd = false
 		case ' ', '\n':
+			flushPendingAddNewline()
 			oldLeft--
 			newLeft--
 			lastWasAdd = false
 		case '\\':
 			// "\ No newline at end of file" for the OLD side mid-hunk;
 			// doesn't consume a counter.
+			flushPendingAddNewline()
 			p.readLine()
 			continue
 		default:
 			// Malformed/truncated; stop consuming.
+			flushPendingAddNewline()
 			oldLeft, newLeft = 0, 0
 			continue
 		}
@@ -447,12 +589,11 @@ func (p *fastLogParser) parseHunk() *gitdiff.TextFragment {
 	// the last emitted line (only affects Raw when that line was an add).
 	if p.line != nil && len(p.line) >= 2 && p.line[0] == '\\' && p.line[1] == ' ' {
 		if lastWasAdd {
-			b := added.Bytes()
-			if n := len(b); n > 0 && b[n-1] == '\n' {
-				added.Truncate(n - 1)
-			}
+			pendingAddNewline = false
 		}
 		p.readLine()
+	} else {
+		flushPendingAddNewline()
 	}
 
 	frag.LinesAdded = newCount // informational; consumer doesn't read it
@@ -466,12 +607,43 @@ func (p *fastLogParser) parseHunk() *gitdiff.TextFragment {
 func parseRangeBytes(b []byte) (start, count int64) {
 	comma := bytes.IndexByte(b, ',')
 	if comma < 0 {
-		start, _ = strconv.ParseInt(string(b), 10, 64)
-		return start, 1
+		return parseInt64Bytes(b), 1
 	}
-	start, _ = strconv.ParseInt(string(b[:comma]), 10, 64)
-	count, _ = strconv.ParseInt(string(b[comma+1:]), 10, 64)
-	return start, count
+	return parseInt64Bytes(b[:comma]), parseInt64Bytes(b[comma+1:])
+}
+
+func parseInt64Bytes(b []byte) int64 {
+	if len(b) == 0 {
+		return 0
+	}
+	neg := false
+	i := 0
+	switch b[0] {
+	case '-':
+		neg = true
+		i = 1
+	case '+':
+		i = 1
+	}
+	if i == len(b) {
+		return 0
+	}
+	if len(b)-i > 18 {
+		n, _ := strconv.ParseInt(string(b), 10, 64)
+		return n
+	}
+	var n int64
+	for ; i < len(b); i++ {
+		c := b[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int64(c-'0')
+	}
+	if neg {
+		return -n
+	}
+	return n
 }
 
 // parseAbName extracts the path from a "--- a/path" / "+++ b/path" value,

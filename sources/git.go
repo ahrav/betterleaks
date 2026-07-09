@@ -439,6 +439,13 @@ type Git struct {
 	MaxArchiveDepth int
 }
 
+func rawAddedText(tf *gitdiff.TextFragment) string {
+	if len(tf.Lines) == 1 && tf.Lines[0].Op == gitdiff.OpAdd {
+		return tf.Lines[0].Line
+	}
+	return tf.Raw(gitdiff.OpAdd)
+}
+
 // Fragments yields fragments from a git repo
 func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	defer func() {
@@ -550,7 +557,7 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 						return nil
 					}
 					fragment := Fragment{
-						Raw:        textFragment.Raw(gitdiff.OpAdd),
+						Raw:        rawAddedText(textFragment),
 						StartLine:  int(textFragment.NewPosition),
 						Attributes: commitAttrs,
 					}

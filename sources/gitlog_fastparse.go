@@ -116,7 +116,19 @@ func chompNL(line []byte) []byte {
 // so PatchHeader.Message() output is unchanged.
 func (p *fastLogParser) parseCommitHeader() {
 	h := &gitdiff.PatchHeader{}
-	rest := chompNL(p.line)[len("commit "):]
+	// TrimSpace mirrors gitdiff.ParsePatchHeader, which trims the header
+	// line before prefix-matching. A "commit" line with only whitespace
+	// after it therefore fails gitdiff's `commit ` prefix check entirely:
+	// the header is rejected and subsequent files carry a nil PatchHeader.
+	// Real `git log` output always has a SHA here; this path only matters
+	// for malformed streams, where the differential fuzz oracle requires
+	// matching gitdiff exactly.
+	rest := bytes.TrimSpace(chompNL(p.line)[len("commit "):])
+	if len(rest) == 0 {
+		p.header = nil
+		p.readLine()
+		return
+	}
 	if i := bytes.IndexByte(rest, ' '); i > 0 {
 		h.SHA = string(rest[:i])
 	} else {
@@ -124,7 +136,11 @@ func (p *fastLogParser) parseCommitHeader() {
 	}
 	p.readLine()
 
-	// Header fields until blank line.
+	// Header fields until blank line. gitdiff.Parse drops the WHOLE header
+	// (files carry nil PatchHeader) when any field fails to parse — real
+	// git output never trips this, but the differential fuzz oracle
+	// requires identical behavior on malformed streams.
+	var hdrErr error
 	for p.line != nil {
 		line := chompNL(p.line)
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -132,23 +148,46 @@ func (p *fastLogParser) parseCommitHeader() {
 		}
 		switch {
 		case bytes.HasPrefix(line, []byte("Author:")):
-			ident := parseIdentity(string(line[len("Author:"):]))
-			h.Author = &ident
+			ident, err := gitdiff.ParsePatchIdentity(string(line[len("Author:"):]))
+			if err != nil {
+				hdrErr = err
+			} else {
+				h.Author = &ident
+			}
 		case bytes.HasPrefix(line, []byte("AuthorDate:")):
-			h.AuthorDate = parseGitDefaultDate(strings.TrimSpace(string(line[len("AuthorDate:"):])))
+			d, err := gitdiff.ParsePatchDate(strings.TrimSpace(string(line[len("AuthorDate:"):])))
+			if err != nil {
+				hdrErr = err
+			} else {
+				h.AuthorDate = d
+			}
 		case bytes.HasPrefix(line, []byte("Date:")):
-			h.AuthorDate = parseGitDefaultDate(strings.TrimSpace(string(line[len("Date:"):])))
+			d, err := gitdiff.ParsePatchDate(strings.TrimSpace(string(line[len("Date:"):])))
+			if err != nil {
+				hdrErr = err
+			} else {
+				h.AuthorDate = d
+			}
 		case bytes.HasPrefix(line, []byte("Commit:")):
-			ident := parseIdentity(string(line[len("Commit:"):]))
-			h.Committer = &ident
+			ident, err := gitdiff.ParsePatchIdentity(string(line[len("Commit:"):]))
+			if err != nil {
+				hdrErr = err
+			} else {
+				h.Committer = &ident
+			}
 		case bytes.HasPrefix(line, []byte("CommitDate:")):
-			h.CommitterDate = parseGitDefaultDate(strings.TrimSpace(string(line[len("CommitDate:"):])))
+			d, err := gitdiff.ParsePatchDate(strings.TrimSpace(string(line[len("CommitDate:"):])))
+			if err != nil {
+				hdrErr = err
+			} else {
+				h.CommitterDate = d
+			}
 		}
 		p.readLine()
 		// A new commit or diff header inside the field block ends it
 		// (defensive; git always emits the blank line).
 		if p.line != nil && (bytes.HasPrefix(p.line, []byte("commit ")) || bytes.HasPrefix(p.line, []byte("diff --git "))) {
-			p.header = h
+			p.setHeader(h, hdrErr)
 			return
 		}
 	}
@@ -215,42 +254,30 @@ func (p *fastLogParser) parseCommitHeader() {
 	if h.Title != "" {
 		h.Body = body.String()
 	}
+	p.setHeader(h, hdrErr)
+}
+
+// setHeader installs the parsed commit header, or nil when any field failed
+// to parse — mirroring gitdiff.Parse, which ignores ParsePatchHeader errors
+// and leaves subsequent files with a nil PatchHeader.
+func (p *fastLogParser) setHeader(h *gitdiff.PatchHeader, err error) {
+	if err != nil {
+		p.header = nil
+		return
+	}
 	p.header = h
 }
 
-// parseIdentity mirrors gitdiff.ParsePatchIdentity for the "Name <email>"
-// shape git's pretty format always produces.
-func parseIdentity(s string) gitdiff.PatchIdentity {
-	var emailStart, emailEnd int
-	for i, c := range s {
-		if c == '<' && emailStart == 0 {
-			emailStart = i + 1
-		}
-		if c == '>' && emailStart > 0 {
-			emailEnd = i
-			break
-		}
-	}
-	var name, email string
-	if emailStart > 0 {
-		name = strings.TrimSpace(s[:emailStart-1])
-	}
-	if emailStart > 0 && emailEnd > 0 {
-		email = strings.TrimSpace(s[emailStart:emailEnd])
-	}
-	return gitdiff.PatchIdentity{Name: name, Email: email}
-}
-
-// gitDefaultDateLayout is git log's default pretty date format.
-const gitDefaultDateLayout = "Mon Jan 2 15:04:05 2006 -0700"
-
+// parseGitDefaultDate parses a Date: header value. Delegates to
+// gitdiff.ParsePatchDate so all its accepted layouts (default, iso, rfc,
+// unix, raw) behave identically; this runs once per commit, not per line,
+// so the layout cascade is not a hot path.
 func parseGitDefaultDate(s string) time.Time {
-	if t, err := time.ParseInLocation(gitDefaultDateLayout, s, time.Local); err == nil {
-		return t
+	t, err := gitdiff.ParsePatchDate(s)
+	if err != nil {
+		return time.Time{}
 	}
-	// Fall back to gitdiff's full parser behavior of "zero time on failure";
-	// scanning proceeds either way.
-	return time.Time{}
+	return t
 }
 
 // parseFileDiff consumes one `diff --git` block: extended headers, then

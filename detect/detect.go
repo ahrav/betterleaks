@@ -110,7 +110,17 @@ type Detector struct {
 	// ruleGates holds cheap rejection regexes for semi-generic rules; see
 	// rule_gate.go. A fragment that fails a rule's gate cannot match the
 	// rule's full pattern, so the expensive scan is skipped.
-	ruleGates map[string]*blregexp.Regexp
+	ruleGates map[string]ruleGate
+	// ruleGateStats is opt-in instrumentation used by tests and benchmarks to
+	// attribute detector work. Production scans leave it nil.
+	ruleGateStats *ruleGateStats
+	// disableRuleGateRequiredAnyCache lets benchmarks compare the old per-rule
+	// required-byte scan against the per-decode-pass cache.
+	disableRuleGateRequiredAnyCache bool
+	// mandatoryAtomGatesByRank stores conservative required-literal gates
+	// parallel to rulesBySpecificity. A missing atom proves the full regex
+	// cannot match; the full regex still produces every finding.
+	mandatoryAtomGatesByRank [][][]byte
 
 	// a list of known findings that should be ignored
 	baseline []report.Finding
@@ -268,8 +278,12 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 	}
 	d.rulesBySpecificity = orderedRulesBySpecificity(cfg)
 	d.ruleRank = make(map[string]int, len(d.rulesBySpecificity))
+	d.mandatoryAtomGatesByRank = make([][][]byte, len(d.rulesBySpecificity))
 	for i, ruleID := range d.rulesBySpecificity {
 		d.ruleRank[ruleID] = i
+		if rule := cfg.Rules[ruleID]; rule.Regex != nil {
+			d.mandatoryAtomGatesByRank[i] = mandatoryAtomGateForPattern(rule.Regex.String(), rule.Keywords)
+		}
 	}
 
 	// Pre-resolve keyword->rule and no-keyword rule lists to specificity ranks
@@ -708,6 +722,10 @@ func (d *Detector) DetectString(content string) []report.Finding {
 }
 
 func (d *Detector) detectFragment(ctx context.Context, fragment sources.Fragment) []report.Finding {
+	if d.ruleGateStats != nil {
+		d.ruleGateStats.fragments.Add(1)
+	}
+
 	// Skip the config file and baseline file to prevent self-scanning.
 	if path := fragment.Attr(sources.AttrPath); path != "" {
 		if samePath(path, d.Config.Path) || (d.baselinePath != "" && samePath(path, d.baselinePath)) {
@@ -737,6 +755,14 @@ ScanLoop:
 		case <-ctx.Done():
 			break ScanLoop
 		default:
+			if d.ruleGateStats != nil {
+				d.ruleGateStats.decodePasses.Add(1)
+				d.ruleGateStats.decodePassBytes.Add(uint64(len(currentRaw)))
+			}
+			var gateFacts *ruleGateScanFacts
+			if !d.disableRuleGateRequiredAnyCache {
+				gateFacts = &ruleGateScanFacts{}
+			}
 			// Use Aho-Corasick to find keyword matches, then map pattern
 			// indices directly to the rules that need checking. Walk is
 			// zero-allocation; the callback fires once per match.
@@ -755,7 +781,6 @@ ScanLoop:
 				}
 				return true
 			})
-			putLowerBuf(lowerBufPtr)
 			// Always include rules that have no keywords.
 			for _, rank := range d.noKeywordRuleRanks {
 				if !scratch.seen[rank] {
@@ -773,8 +798,28 @@ ScanLoop:
 				case <-ctx.Done():
 					cancelled = true
 				default:
+					var atoms [][]byte
+					if rank < len(d.mandatoryAtomGatesByRank) {
+						atoms = d.mandatoryAtomGatesByRank[rank]
+					}
+					if len(atoms) > 0 {
+						if d.ruleGateStats != nil {
+							d.ruleGateStats.mandatoryAtomChecks.Add(1)
+							d.ruleGateStats.mandatoryAtomBytes.Add(uint64(len(lowerBuf) * len(atoms)))
+						}
+						if !mandatoryAtomsPresent(lowerBuf, atoms) {
+							if d.ruleGateStats != nil {
+								d.ruleGateStats.ruleChecks.Add(1)
+								d.ruleGateStats.mandatoryAtomRejects.Add(1)
+							}
+							continue
+						}
+						if d.ruleGateStats != nil {
+							d.ruleGateStats.mandatoryAtomAccepts.Add(1)
+						}
+					}
 					rule := d.Config.Rules[d.rulesBySpecificity[rank]]
-					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings)...)
+					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings, gateFacts)...)
 				}
 				if cancelled {
 					break
@@ -782,6 +827,7 @@ ScanLoop:
 			}
 			scratch.reset()
 			d.candidatePool.Put(scratch)
+			putLowerBuf(lowerBufPtr)
 			if cancelled {
 				break ScanLoop
 			}
@@ -803,7 +849,11 @@ ScanLoop:
 			}
 		}
 	}
-	return filter(findings)
+	filtered := filter(findings)
+	if d.ruleGateStats != nil {
+		d.ruleGateStats.filteredFindings.Add(uint64(len(filtered)))
+	}
+	return filtered
 }
 
 // candidateScratch is the pooled per-fragment scratch for collecting the set
@@ -851,8 +901,12 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 	currentRaw string,
 	r config.Rule,
 	encodedSegments []*codec.EncodedSegment,
-	priorFindings []report.Finding) []report.Finding {
+	priorFindings []report.Finding,
+	gateFacts *ruleGateScanFacts) []report.Finding {
 	var findings []report.Finding
+	if d.ruleGateStats != nil {
+		d.ruleGateStats.ruleChecks.Add(1)
+	}
 
 	// Building a zerolog.Logger allocates; findings are rare relative to
 	// rule checks, so defer construction until a log call is actually made.
@@ -891,13 +945,29 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 	// Cheap rejection gate: the prefix-stripped pattern matches iff the full
 	// pattern has any match, and it scans ~3x faster (see rule_gate.go).
-	if gate, ok := d.ruleGates[r.RuleID]; ok && !gate.MatchString(currentRaw) {
-		return findings
+	if gate, ok := d.ruleGates[r.RuleID]; ok {
+		if d.ruleGateStats != nil {
+			d.ruleGateStats.gatedRuleChecks.Add(1)
+		}
+		if !gate.matchString(currentRaw, gateFacts, d.ruleGateStats) {
+			return findings
+		}
 	}
 
+	if d.ruleGateStats != nil {
+		d.ruleGateStats.fullRegexCalls.Add(1)
+		d.ruleGateStats.fullRegexBytes.Add(uint64(len(currentRaw)))
+	}
 	matches := r.Regex.FindAllStringIndex(currentRaw, -1)
 	if len(matches) == 0 {
+		if d.ruleGateStats != nil {
+			d.ruleGateStats.fullRegexNoMatchCalls.Add(1)
+		}
 		return findings
+	}
+	if d.ruleGateStats != nil {
+		d.ruleGateStats.fullRegexMatchCalls.Add(1)
+		d.ruleGateStats.fullRegexMatchSpans.Add(uint64(len(matches)))
 	}
 
 	// Lazily compute newline indices — only when we actually need location info.
@@ -995,7 +1065,10 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 
 		// Set the value of |secret|, if the pattern contains at least one capture group.
 		// (The first element is the full match, hence we check >= 2.)
-		groups := r.Regex.FindStringSubmatch(finding.Secret)
+		var groups []string
+		if r.Regex.NumSubexp() > 0 {
+			groups = r.Regex.FindStringSubmatch(finding.Secret)
+		}
 		if len(groups) >= 2 {
 			if r.SecretGroup > 0 {
 				if len(groups) <= r.SecretGroup {
@@ -1129,7 +1202,7 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 		inheritedFragment.InheritedFromFinding = true
 
 		// Call detectRule once for each required rule
-		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, rule, encodedSegments, nil)
+		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, rule, encodedSegments, nil, nil)
 		allRequiredFindings[requiredRule.RuleID] = requiredFindings
 
 		logger().Debug().

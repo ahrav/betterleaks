@@ -7,7 +7,7 @@ index 444a108..af115d8 100644
  #include "xinclude.h"
  
 +#define XXH_INLINE_ALL
-+#define XXH_NO_XXH32
++#define XXH_NO_STREAM
 +#if defined(__aarch64__)
 +#define XXH_VECTOR 0 /* avoid AArch64 GCC NEON alignment sanitizer trips */
 +#endif

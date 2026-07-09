@@ -37,9 +37,20 @@ This is output-safe because the line hash is only an internal bucketing key:
 every classifier hit is verified with `xdl_recmatch` (content equality) and the
 diff machinery consumes canonical class indices, never raw hash values. Any
 deterministic content hash produces byte-identical diffs as long as equal byte
-strings produce equal hashes; collisions only cost time. Verified: `cmp` clean
-on 20k-commit prometheus and 197k-commit gitlab-foss patch streams, including
-root commits, merges, renames, and unicode paths.
+strings produce equal hashes; collisions only cost time.
+
+Audit evidence (2026-07-09 byte-exactness audit): `cmp`-identical
+vanilla-vs-patched output on full prometheus (20k commits, 424 MB) and
+gitlab-foss (197k commits, 7.4 GB) histories under a ~70-configuration flag
+matrix (all four diff algorithms, every whitespace flag, `--color-moved`
+variants, word-diff, `-W`, `--anchored`, `-m`/`--cc`, blame, merge-tree,
+merge-file, range-diff, patch-id, `apply --3way`, staged diffs, textconv/CRLF
+attrs, `--follow`, pickaxe); 1000 randomized fuzz repos incl. NUL/CRLF/
+full-byte-range content; a degenerate build whose line hash returns constant 0
+(worst-case collisions) still `cmp`-identical — empirical proof output cannot
+depend on the hash function; a 38.7M-case harness proving cursor-advancement
+and hashed-range equivalence incl. mmap guard-page adjacency; ASan+UBSan clean
+over full prometheus history; git's own test suite (30k+ tests) passing.
 
 ## Build recipe
 
@@ -58,9 +69,13 @@ cp zlib-ng/build/{zlib.h,zconf.h,zlib_name_mangling.h} zng/include/
 
 # xdiff patch (from this directory)
 curl -sLo xdiff/xxhash.h https://raw.githubusercontent.com/Cyan4973/xxHash/v0.8.2/xxhash.h
+echo "be275e9db21a503c37f24683cdb4908f2370a3e35ab96e02c4ea73dc8e399c43  xdiff/xxhash.h" | sha256sum -c
 patch -p1 < xdiff-xxh3.patch
 
-FLAGS="NO_CURL=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_EXPAT=1 ZLIB_PATH=$PWD/zng"
+# GIT_VERSION pins the version string; without it a git built from a patched
+# clone reports "2.50.1.dirty", which leaks into format-patch signature
+# trailers (the only output that embeds it — log/diff/blame streams do not).
+FLAGS="NO_CURL=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_EXPAT=1 ZLIB_PATH=$PWD/zng GIT_VERSION=2.50.1"
 
 # pass 1: instrumented
 make -j CFLAGS="-O3 -fprofile-generate -I$PWD/zng/include" \
@@ -68,7 +83,8 @@ make -j CFLAGS="-O3 -fprofile-generate -I$PWD/zng/include" \
 # representative profile: whole-history log -p on a real repo
 ./git -C /path/to/big/repo log -p -U0 --full-history --all --diff-filter=tuxdb >/dev/null
 
-# pass 2: optimized
+# pass 2: optimized (git's Makefile tracks CFLAGS in GIT-CFLAGS, so the flag
+# change alone forces a full rebuild — no `make clean` needed between passes)
 make -j CFLAGS="-O3 -flto=auto -fprofile-use -fprofile-correction -Wno-missing-profile -Wno-error -I$PWD/zng/include" \
         LDFLAGS="-flto=auto -fprofile-use -L$PWD/zng/lib" $FLAGS git
 ```

@@ -215,7 +215,7 @@ func newGitLogCommitsCmd(ctx context.Context, source string, commits []string) (
 	sourceClean := filepath.Clean(source)
 	args := []string{"-C", sourceClean, "log", "-p", "-U0", "--no-walk", "--stdin", "--diff-filter=tuxdb"}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitBinary(), args...)
 	cmd.Env = gitConfigIsolationEnv()
 	logging.Debug().Msgf("executing: %s (%d commits via stdin)", cmd.String(), len(commits))
 
@@ -263,7 +263,7 @@ func newGitLogCommitsCmd(ctx context.Context, source string, commits []string) (
 // startGitLogCmd is the shared tail for starting a git log process, wiring up
 // stdout/stderr pipes, and returning a GitCmd.
 func startGitLogCmd(ctx context.Context, repoPath string, args []string) (*GitCmd, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitBinary(), args...)
 	cmd.Env = gitConfigIsolationEnv()
 	logging.Debug().Msgf("executing: %s", cmd.String())
 
@@ -313,7 +313,7 @@ func listCommits(ctx context.Context, source string, logOpts string) ([]string, 
 		args = append(args, "--all")
 	}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitBinary(), args...)
 	cmd.Env = gitConfigIsolationEnv()
 	out, err := cmd.Output()
 	if err != nil {
@@ -342,7 +342,7 @@ func commitCount(ctx context.Context, source string, logOpts string) (int, error
 		args = append(args, "--all")
 	}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitBinary(), args...)
 	cmd.Env = gitConfigIsolationEnv()
 	out, err := cmd.Output()
 	if err != nil {

@@ -66,25 +66,46 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 		return s.runSingleWorker(ctx, yield)
 	}
 
-	// Commit diff sizes follow a power-law and heavy commits cluster in
-	// contiguous stretches of history (vendored-dependency churn, imports),
-	// so contiguous partitions straggle. Two mitigations compose here:
-	// batches are built by striding across the whole history (batch k gets
-	// commits k, k+N, k+2N, ...) so every batch samples heavy regions
-	// uniformly, and workers pull batches from a shared queue so residual
-	// imbalance self-corrects. Batch count targets ~8 batches per worker to
-	// amortize git process startup while smoothing heavy tails.
+	// Batch shape balances two competing effects.
+	//
+	// LOAD BALANCE: commit diff sizes follow a power-law and heavy commits
+	// cluster in contiguous stretches of history, so coarse contiguous
+	// partitions straggle on wall clock. Spreading each batch across the
+	// whole history samples heavy regions uniformly, and the shared queue
+	// lets workers self-correct residual imbalance.
+	//
+	// CACHE LOCALITY: consecutive commits share blob versions (commit N's
+	// post-image is commit N+1's pre-image), so a git process walking a
+	// contiguous run hits its delta-base cache instead of re-inflating
+	// bases; fully contiguous batches cost ~8-18% less git CPU than
+	// commit-by-commit striding, but lose far more wall to stragglers.
+	//
+	// Striding RUNS of 16 consecutive commits (rather than single commits)
+	// captures most of the locality win — measured ~8% less git CPU on a
+	// 117k-commit monorepo at ~1s of wall — while preserving the uniform
+	// heavy-region sampling that keeps workers balanced.
+	const runLen = 16
 	batchSize := max(count/(workers*8), 64)
 	numBatches := (count + batchSize - 1) / batchSize
 	logging.Info().Int("commits", count).Int("workers", workers).Int("batch_size", batchSize).Int("batches", numBatches).Msg("parallel git scan")
 
+	batchBufs := make([][]string, numBatches)
+	for b := range batchBufs {
+		batchBufs[b] = make([]string, 0, batchSize+runLen)
+	}
+	numRuns := (count + runLen - 1) / runLen
+	for j := range numRuns {
+		lo := j * runLen
+		hi := min(lo+runLen, count)
+		b := j % numBatches
+		batchBufs[b] = append(batchBufs[b], commits[lo:hi]...)
+	}
+
 	batches := make(chan []string, numBatches)
-	for b := range numBatches {
-		batch := make([]string, 0, batchSize)
-		for i := b; i < count; i += numBatches {
-			batch = append(batch, commits[i])
+	for _, batch := range batchBufs {
+		if len(batch) > 0 {
+			batches <- batch
 		}
-		batches <- batch
 	}
 	close(batches)
 

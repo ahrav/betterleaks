@@ -1026,3 +1026,35 @@ weakness, partially inherent to multi-session work: cross-session baseline mixin
   the fork's TSV before the fork-B PR goes up.
 - [ ] Name the RE2 version the engine reasoning applies to (system libre2 for cgo;
   the wasm build's pinned RE2) in the PR6/PR12 descriptions.
+
+---
+
+## F3: e2e re-measurement at final pins (2026-07-10, quiet box, load 1-5)
+
+Portable-binary isolation matrix (benchcpu2, 3 runs, cpu-s mean; digests
+byte-identical across all rows):
+
+| Binary | self-repo (regex-heavy) | prometheus (git-heavy) |
+|---|---|---|
+| upstream wazero v1.12.0 | 19.34 | 38.39 |
+| **wazero fork @48fbe11a** | **12.45 (−36%)** | 38.15 (−0.6%) |
+| cgo re2 (reference) | 3.48 | 36.28 |
+
+Reading: the fork's win concentrates where regex CPU dominates (self-repo:
+detector is ~all of the work). On git-subprocess-dominated corpora the
+whole-tree delta is noise-level — as expected, since git owns ~85% of the
+CPU there. **The earlier "fork" numbers in this doc were measured while the
+fork was silently inactive** (dependency go.mod replaces don't apply); this
+matrix is the first honest measurement at the real pins.
+
+Elision on/off split (fork binary, self-repo, alternating x3): means
+overlap within run-to-run noise (~9.7–11.7 either way, σ up to 2.3). The
+guard-page elision contribution is not resolvable end-to-end on this
+corpus — its measured value came from regex microbenches in the fork's own
+audit. The knob (and its cache-salt isolation, proven embedder-side by
+TestCompilationCacheSaltedByElision) matters for safety posture regardless.
+
+Bottom line for the default (portable) build: **~1.55x less detector CPU vs
+upstream wazero on regex-heavy scans**, converging toward cgo (now 3.6x
+apart on pure-regex work, from 5.6x); parity on git-heavy scans. cgo stays
+the opt-in fast path via `make build-cgo`.

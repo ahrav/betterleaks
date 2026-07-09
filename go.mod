@@ -78,3 +78,5 @@ require (
 replace github.com/BobuSumisu/aho-corasick => /local/home/ahrav/scratch/aho-integration
 
 replace github.com/betterleaks/go-re2 => /local/home/ahrav/scratch/go-re2-integration
+
+replace github.com/tetratelabs/wazero => github.com/ahrav/wazero v0.0.0-20260709023623-48fbe11ac9ca

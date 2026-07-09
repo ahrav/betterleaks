@@ -66,46 +66,12 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 		return s.runSingleWorker(ctx, yield)
 	}
 
-	// Batch shape balances two competing effects.
-	//
-	// LOAD BALANCE: commit diff sizes follow a power-law and heavy commits
-	// cluster in contiguous stretches of history, so coarse contiguous
-	// partitions straggle on wall clock. Spreading each batch across the
-	// whole history samples heavy regions uniformly, and the shared queue
-	// lets workers self-correct residual imbalance.
-	//
-	// CACHE LOCALITY: consecutive commits share blob versions (commit N's
-	// post-image is commit N+1's pre-image), so a git process walking a
-	// contiguous run hits its delta-base cache instead of re-inflating
-	// bases; fully contiguous batches cost ~8-18% less git CPU than
-	// commit-by-commit striding, but lose far more wall to stragglers.
-	//
-	// Striding RUNS of 16 consecutive commits (rather than single commits)
-	// captures most of the locality win — measured ~8% less git CPU on a
-	// 117k-commit monorepo at ~1s of wall — while preserving the uniform
-	// heavy-region sampling that keeps workers balanced.
-	const runLen = 16
-	batchSize := max(count/(workers*8), 64)
-	numBatches := (count + batchSize - 1) / batchSize
-	logging.Info().Int("commits", count).Int("workers", workers).Int("batch_size", batchSize).Int("batches", numBatches).Msg("parallel git scan")
+	batchBufs := buildBatches(commits, workers)
+	logging.Info().Int("commits", count).Int("workers", workers).Int("batches", len(batchBufs)).Msg("parallel git scan")
 
-	batchBufs := make([][]string, numBatches)
-	for b := range batchBufs {
-		batchBufs[b] = make([]string, 0, batchSize+runLen)
-	}
-	numRuns := (count + runLen - 1) / runLen
-	for j := range numRuns {
-		lo := j * runLen
-		hi := min(lo+runLen, count)
-		b := j % numBatches
-		batchBufs[b] = append(batchBufs[b], commits[lo:hi]...)
-	}
-
-	batches := make(chan []string, numBatches)
+	batches := make(chan []string, len(batchBufs))
 	for _, batch := range batchBufs {
-		if len(batch) > 0 {
-			batches <- batch
-		}
+		batches <- batch
 	}
 	close(batches)
 
@@ -125,6 +91,63 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 	}
 
 	return g.Wait()
+}
+
+// batchRunLen is the length of the contiguous commit runs dealt to batches.
+const batchRunLen = 16
+
+// buildBatches deals commits into batches for the parallel git workers.
+//
+// Batch shape balances two competing effects.
+//
+// LOAD BALANCE: commit diff sizes follow a power-law and heavy commits
+// cluster in contiguous stretches of history, so coarse contiguous
+// partitions straggle on wall clock. Spreading each batch across the
+// whole history samples heavy regions uniformly, and the shared queue
+// lets workers self-correct residual imbalance.
+//
+// CACHE LOCALITY: consecutive commits share blob versions (commit N's
+// post-image is commit N+1's pre-image), so a git process walking a
+// contiguous run hits its delta-base cache instead of re-inflating
+// bases; fully contiguous batches cost ~8-18% less git CPU than
+// commit-by-commit striding, but lose far more wall to stragglers.
+//
+// Striding RUNS of batchRunLen consecutive commits (rather than single
+// commits) captures most of the locality win — measured ~8% less git CPU
+// on a 117k-commit monorepo at ~1s of wall — while preserving the uniform
+// heavy-region sampling that keeps workers balanced.
+//
+// Invariants (property-tested): the concatenation of all batches is a
+// permutation of the input with no loss or duplication, every batch is a
+// concatenation of batchRunLen-aligned contiguous input runs, and no batch
+// is empty.
+func buildBatches(commits []string, workers int) [][]string {
+	count := len(commits)
+	if count == 0 {
+		return nil
+	}
+	batchSize := max(count/(workers*8), 64)
+	numBatches := (count + batchSize - 1) / batchSize
+
+	batchBufs := make([][]string, numBatches)
+	for b := range batchBufs {
+		batchBufs[b] = make([]string, 0, batchSize+batchRunLen)
+	}
+	numRuns := (count + batchRunLen - 1) / batchRunLen
+	for j := range numRuns {
+		lo := j * batchRunLen
+		hi := min(lo+batchRunLen, count)
+		b := j % numBatches
+		batchBufs[b] = append(batchBufs[b], commits[lo:hi]...)
+	}
+
+	out := batchBufs[:0]
+	for _, batch := range batchBufs {
+		if len(batch) > 0 {
+			out = append(out, batch)
+		}
+	}
+	return out
 }
 
 // runSingleWorker runs a full git log (no partitioning) for small repos or

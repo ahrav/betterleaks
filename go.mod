@@ -75,4 +75,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/BobuSumisu/aho-corasick => /local/home/ahrav/scratch/aho-corasick
+replace github.com/BobuSumisu/aho-corasick => /local/home/ahrav/scratch/aho-integration
+
+replace github.com/betterleaks/go-re2 => /local/home/ahrav/scratch/go-re2-integration

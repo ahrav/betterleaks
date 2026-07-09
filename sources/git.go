@@ -164,7 +164,8 @@ func NewGitLogCmd(source string, logOpts string) (*GitCmd, error) {
 func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*GitCmd, error) {
 	sourceClean := filepath.Clean(source)
 	var cmd *exec.Cmd
-	if logOpts != "" {
+	hasUserOpts := logOpts != ""
+	if hasUserOpts {
 		args := []string{"-C", sourceClean, "log", "-p", "-U0"}
 
 		userArgs, err := splitGitLogOpts(logOpts)
@@ -197,7 +198,15 @@ func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*G
 	errCh := make(chan error)
 	go listenForStdErr(stderr, errCh)
 
-	gitdiffFiles, err := gitdiff.Parse(stdout)
+	// User --log-opts can change the stream format (--pretty, -U3, ...);
+	// only the default betterleaks-shaped stream goes through the fast
+	// parser (see fastParseGitLog).
+	var gitdiffFiles <-chan *gitdiff.File
+	if hasUserOpts {
+		gitdiffFiles, err = gitdiff.Parse(stdout)
+	} else {
+		gitdiffFiles, err = fastParseGitLog(stdout)
+	}
 	if err != nil {
 		return nil, err
 	}

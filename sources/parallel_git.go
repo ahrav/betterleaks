@@ -201,11 +201,10 @@ func newGitLogCmd(ctx context.Context, source string, logOpts string) (*GitCmd, 
 			return nil, fmt.Errorf("invalid --log-opts: %w", err)
 		}
 		args = append(args, userArgs...)
-	} else {
-		args = append(args, "--full-history", "--all", "--diff-filter=tuxdb")
+		return startGitLogCmd(ctx, sourceClean, args, true)
 	}
-
-	return startGitLogCmd(ctx, sourceClean, args)
+	args = append(args, "--full-history", "--all", "--diff-filter=tuxdb")
+	return startGitLogCmd(ctx, sourceClean, args, false)
 }
 
 // newGitLogCommitsCmd constructs a git log -p command that processes a specific
@@ -247,7 +246,7 @@ func newGitLogCommitsCmd(ctx context.Context, source string, commits []string) (
 	errCh := make(chan error)
 	go listenForStdErr(stderr, errCh)
 
-	gitdiffFiles, err := gitdiff.Parse(stdout)
+	gitdiffFiles, err := fastParseGitLog(stdout)
 	if err != nil {
 		return nil, err
 	}
@@ -261,8 +260,12 @@ func newGitLogCommitsCmd(ctx context.Context, source string, commits []string) (
 }
 
 // startGitLogCmd is the shared tail for starting a git log process, wiring up
-// stdout/stderr pipes, and returning a GitCmd.
-func startGitLogCmd(ctx context.Context, repoPath string, args []string) (*GitCmd, error) {
+// stdout/stderr pipes, and returning a GitCmd. hasUserOpts selects the
+// general gitdiff parser: user-provided --log-opts can change the output
+// format (--pretty, --src-prefix, -U3, ...) beyond what the fast parser
+// understands, while betterleaks-constructed argument lists always produce
+// the default `log -p -U0` stream shape.
+func startGitLogCmd(ctx context.Context, repoPath string, args []string, hasUserOpts bool) (*GitCmd, error) {
 	cmd := exec.CommandContext(ctx, gitBinary(), args...)
 	cmd.Env = gitConfigIsolationEnv()
 	logging.Debug().Msgf("executing: %s", cmd.String())
@@ -282,7 +285,12 @@ func startGitLogCmd(ctx context.Context, repoPath string, args []string) (*GitCm
 	errCh := make(chan error)
 	go listenForStdErr(stderr, errCh)
 
-	gitdiffFiles, err := gitdiff.Parse(stdout)
+	var gitdiffFiles <-chan *gitdiff.File
+	if hasUserOpts {
+		gitdiffFiles, err = gitdiff.Parse(stdout)
+	} else {
+		gitdiffFiles, err = fastParseGitLog(stdout)
+	}
 	if err != nil {
 		return nil, err
 	}

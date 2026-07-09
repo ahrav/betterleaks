@@ -29,14 +29,17 @@ git keeps working as the default whenever the env var is unset.
 serial 2-ops-per-byte loop that made `xdl_prepare_ctx` the single hottest
 function in whole-history scans (36% of git CPU, more than zlib inflate).
 
-The patch replaces it with a `memchr` newline scan (vectorized) + XXH3
-(vectorized). This is output-safe because the line hash is only an internal
-bucketing key: every classifier hit is verified with `xdl_recmatch` (content
-equality) and the diff machinery consumes canonical class indices, never raw
-hash values. Any hash function produces byte-identical diffs; collisions only
-cost time. Verified: `cmp` clean on 2k-commit (prometheus) and 5k-commit
-(gitlab-foss, includes root commit, merges, renames, unicode paths) patch
-streams.
+The patch replaces it with a vectorized `memchr` newline scan plus XXH3 line
+hashing. On AArch64 it forces XXH3's scalar backend because the GCC NEON backend
+uses intentionally unaligned 128-bit vector loads that are hardware-safe on the
+target but trip UBSAN; other architectures keep XXH3's normal SIMD selection.
+This is output-safe because the line hash is only an internal bucketing key:
+every classifier hit is verified with `xdl_recmatch` (content equality) and the
+diff machinery consumes canonical class indices, never raw hash values. Any
+deterministic content hash produces byte-identical diffs as long as equal byte
+strings produce equal hashes; collisions only cost time. Verified: `cmp` clean
+on 20k-commit prometheus and 197k-commit gitlab-foss patch streams, including
+root commits, merges, renames, and unicode paths.
 
 ## Build recipe
 

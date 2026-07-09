@@ -2,26 +2,30 @@ diff --git a/xdiff/xutils.c b/xdiff/xutils.c
 index 444a108..af115d8 100644
 --- a/xdiff/xutils.c
 +++ b/xdiff/xutils.c
-@@ -22,6 +22,10 @@
+@@ -22,6 +22,13 @@
  
  #include "xinclude.h"
  
 +#define XXH_INLINE_ALL
 +#define XXH_NO_XXH32
++#if defined(__aarch64__)
++#define XXH_VECTOR 0 /* avoid AArch64 GCC NEON alignment sanitizer trips */
++#endif
 +#include "xxhash.h"
 +
  
  long xdl_bogosqrt(long n) {
  	long i;
-@@ -294,20 +298,25 @@ static unsigned long xdl_hash_record_with_whitespace(char const **data,
+@@ -294,20 +301,26 @@ static unsigned long xdl_hash_record_with_whitespace(char const **data,
  	return ha;
  }
  
-+/* Fast path: the hash value is an internal bucketing key only — every
++/* Fast path: the hash value is an internal bucketing key only - every
 + * classifier hit is verified by xdl_recmatch (content equality), and
 + * downstream diffing uses canonical class indices, never raw hashes.
-+ * Any hash function therefore yields byte-identical diff output.
-+ * memchr vectorizes the newline scan and XXH3 vectorizes the hash;
++ * Any deterministic content hash therefore yields byte-identical diff
++ * output as long as equal byte strings produce equal hashes.
++ * memchr vectorizes the newline scan and XXH3 hashes the line;
 + * the original DJB2 loop was a 2-op/byte serial dependency chain that
 + * dominated xdl_prepare_ctx in whole-history `log -p` profiles. */
  unsigned long xdl_hash_record(char const **data, char const *top, long flags) {

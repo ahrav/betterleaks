@@ -1,0 +1,8 @@
+{
+  "name": "Deep research: Reduce overall scanner scan time by optimizing regex/detector regex work while preserving exact findings and semantics; focus on additional techniques beyond the existing semi-generic prefix-stripped rejection gate.",
+  "goal": "Reduce overall scanner scan time by optimizing regex/detector regex work while preserving exact findings and semantics; focus on additional techniques beyond the existing semi-generic prefix-stripped rejection gate.",
+  "metricName": "quality_gap",
+  "metricUnit": "gaps",
+  "bestDirection": "lower",
+  "benchmarkCommand": "bash ./autoresearch.sh"
+}

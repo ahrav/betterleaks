@@ -24,7 +24,7 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Build
+      - name: Build (portable, default)
         run: go build ./...
 
       - name: Set up gotestsum
@@ -32,9 +32,23 @@ jobs:
         run: |
           go install gotest.tools/gotestsum@v1.13.0
 
+      # --race is load-bearing, not belt-and-braces: the parallel dir walk
+      # (hand-rolled condvar pool), the shared exprruntime programs, and the
+      # pooled decoder/env maps are only meaningfully verified under the
+      # race detector. The golden findings-digest test (detect/) and the
+      # parser differential suites (sources/) run as part of ./...
       - name: Test
         run: |
           gotestsum --raw-command -- go test -json ./... --race
+
+      # Regression fuzz: replays the committed corpus (including the inputs
+      # that found the malformed-stream parser divergences) plus a short
+      # exploration budget.
+      - name: Fuzz smoke (parser)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          go test -fuzz='^FuzzFastParseGitLogRobustness$' -fuzztime=30s ./sources/
+          go test -fuzz='^FuzzFastParseGitLogDifferential$' -fuzztime=30s ./sources/
 
       # - name: Validate Config
       #   run: go generate ./... && git diff --exit-code

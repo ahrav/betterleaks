@@ -75,8 +75,8 @@ func buildWalkTree(t *testing.T) (root string, unreadable string) {
 	mk("a/b/two.txt", 30)
 	mk("a/b/c/three.txt", 40)
 	mk("a/b/c/d/four.txt", 50)
-	mk("empty.txt", 0)          // skipped: empty
-	mk("big.bin", 4096)         // skipped when MaxFileSize < 4096
+	mk("empty.txt", 0)  // skipped: empty
+	mk("big.bin", 4096) // skipped when MaxFileSize < 4096
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "emptydir"), 0o755))
 
 	// Deep chain (depth 12).
@@ -87,15 +87,20 @@ func buildWalkTree(t *testing.T) (root string, unreadable string) {
 	require.NoError(t, os.MkdirAll(deep, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(deep, "leaf.txt"), []byte("leaf"), 0o644))
 
-	// Symlinks: one to a file, one to a directory.
-	require.NoError(t, os.Symlink(filepath.Join(root, "top.txt"), filepath.Join(root, "link-to-file")))
-	require.NoError(t, os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "link-to-dir")))
+	// Symlinks: one to a file, one to a directory. Windows requires
+	// elevation for symlink creation; the equivalence property is
+	// platform-independent, so skip the symlink shapes there rather than
+	// the whole test.
+	if runtime.GOOS != "windows" {
+		require.NoError(t, os.Symlink(filepath.Join(root, "top.txt"), filepath.Join(root, "link-to-file")))
+		require.NoError(t, os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "link-to-dir")))
+	}
 
 	// Unreadable subdir (restored in cleanup). Meaningless as root.
 	unreadable = filepath.Join(root, "locked")
 	require.NoError(t, os.MkdirAll(unreadable, 0o755))
 	mk("locked/hidden.txt", 10)
-	if os.Geteuid() != 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
 		require.NoError(t, os.Chmod(unreadable, 0o000))
 		t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
 	}
@@ -112,10 +117,10 @@ func TestScanTargetsParallelEquivalence(t *testing.T) {
 	root, _ := buildWalkTree(t)
 
 	cases := map[string]*Files{
-		"defaults":            {Path: root},
-		"follow-symlinks":     {Path: root, FollowSymlinks: true},
-		"max-file-size":       {Path: root, MaxFileSize: 1024},
-		"symlinks-and-size":   {Path: root, FollowSymlinks: true, MaxFileSize: 1024},
+		"defaults":          {Path: root},
+		"follow-symlinks":   {Path: root, FollowSymlinks: true},
+		"max-file-size":     {Path: root, MaxFileSize: 1024},
+		"symlinks-and-size": {Path: root, FollowSymlinks: true, MaxFileSize: 1024},
 		"skip-subtree": {Path: root, ShouldSkip: func(attrs map[string]string) bool {
 			p := attrs[AttrPath]
 			return p == filepath.Join(root, "a", "b") || filepath.Base(p) == "one.txt"

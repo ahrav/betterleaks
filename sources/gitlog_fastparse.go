@@ -594,3 +594,19 @@ func trimOneComponent(name string) string {
 	}
 	return name
 }
+
+// ParseGitLogStreamForTest runs the fast log-stream parser over a captured
+// patch stream and returns all files. Test-only entry point for golden
+// digest fixtures; production consumers use the channel wiring in
+// startGitLogCmd.
+func ParseGitLogStreamForTest(patch []byte) ([]*gitdiff.File, error) {
+	ch, err := fastParseGitLog(bytes.NewReader(patch))
+	if err != nil {
+		return nil, err
+	}
+	var files []*gitdiff.File
+	for f := range ch {
+		files = append(files, f)
+	}
+	return files, nil
+}

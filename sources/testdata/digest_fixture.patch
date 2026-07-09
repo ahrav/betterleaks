@@ -1,0 +1,2118 @@
+commit 872e3742bc9a8b0cc736835f9c0034d0bc5cf7aa
+Author: Zachary Rice <15034943+zricethezav@users.noreply.github.com>
+Date:   Mon Jul 6 07:33:40 2026 -0500
+
+    bump min ver (#226)
+
+diff --git a/cmd/generate/config/rules/config.tmpl b/cmd/generate/config/rules/config.tmpl
+index 2fc6a5a..d6ed088 100644
+--- a/cmd/generate/config/rules/config.tmpl
++++ b/cmd/generate/config/rules/config.tmpl
+@@ -20 +20 @@ minVersion = "v8.25.0"
+-betterleaksMinVersion = "v1.3.0"
++betterleaksMinVersion = "v1.6.0"
+diff --git a/config/betterleaks.toml b/config/betterleaks.toml
+index d42ea76..a364359 100644
+--- a/config/betterleaks.toml
++++ b/config/betterleaks.toml
+@@ -20 +20 @@ minVersion = "v8.25.0"
+-betterleaksMinVersion = "v1.3.0"
++betterleaksMinVersion = "v1.6.0"
+@@ -3881 +3880,0 @@ entropy(finding["secret"]) <= 3.5
+-|| (matchesAny(finding["secret"], [`^sk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$`]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
+@@ -3884 +3882,0 @@ entropy(finding["secret"]) <= 3.5
+-|| (matchesAny(finding["secret"], [`^sk_test_[A-Za-z0-9_-]{40}$`]) && containsAny(finding["line"], ["paystack"]))
+@@ -3895 +3892,0 @@ entropy(finding["secret"]) <= 3.5
+-|| (matchesAny(finding["secret"], [`^TEST-[0-9]{8,16}-[0-9]{6}-[0-9a-f]{32}-[0-9]{7,10}$`]) && containsAny(finding["line"], ["mercado"]))
+@@ -3916 +3912,0 @@ entropy(finding["secret"]) <= 3.5
+-|| (matchesAny(finding["secret"], [`^sk_test_[0-9a-zA-Z]{20,70}$`]) && containsAny(finding["line"], ["clerk"]))
+
+commit f629149209a94798ff5c222c53ed50d147b0c3b8
+Author: Samiat Akande <samiatakande@yahoo.com>
+Date:   Fri Jul 3 14:43:38 2026 +0100
+
+    fix(detect): log filter-skipped findings (#199)
+
+diff --git a/detect/detect.go b/detect/detect.go
+index cd844a2..6aba5da 100644
+--- a/detect/detect.go
++++ b/detect/detect.go
+@@ -970,0 +971,3 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
++				logger.Trace().
++					Str("finding", finding.Secret).
++					Msg("skipping finding: global filter")
+@@ -982,0 +986,3 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
++				logger.Trace().
++					Str("finding", finding.Secret).
++					Msg("skipping finding: rule filter")
+
+commit 501de591c4bd86fd0ff1605d2eb0022312ecf6c9
+Author: Václav Votípka <enca@enca.cz>
+Date:   Thu Jul 2 15:46:56 2026 +0200
+
+    support for quoted and escaped values in --log-opts (#201)
+    
+    * support for quoted and escaped values in --log-opts
+    
+    * addressed issues from code review
+    
+    should be squashed with previous commit
+
+diff --git a/sources/git.go b/sources/git.go
+index b47b0fe..52f2485 100644
+--- a/sources/git.go
++++ b/sources/git.go
+@@ -19,0 +20 @@ import (
++	"unicode"
+@@ -28,2 +28,0 @@ import (
+-var quotedOptPattern = regexp.MustCompile(`^(?:"[^"]+"|'[^']+')$`)
+-
+@@ -114,11 +113,3 @@ func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*G
+-		// Ensure that the user-provided |logOpts| aren't wrapped in quotes.
+-		// https://github.com/gitleaks/gitleaks/issues/1153
+-		userArgs := strings.Split(logOpts, " ")
+-		var quotedOpts []string
+-		for _, element := range userArgs {
+-			if quotedOptPattern.MatchString(element) {
+-				quotedOpts = append(quotedOpts, element)
+-			}
+-		}
+-		if len(quotedOpts) > 0 {
+-			logging.Warn().Msgf("the following `--log-opts` values may not work as expected: %v\n\tsee https://github.com/gitleaks/gitleaks/issues/1153 for more information", quotedOpts)
++		userArgs, err := splitGitLogOpts(logOpts)
++		if err != nil {
++			return nil, fmt.Errorf("invalid --log-opts: %w", err)
+@@ -164,0 +156,58 @@ func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*G
++// splitGitLogOpts parses user-provided --log-opts with a small shell-inspired
++// tokenizer.
++//
++// Supported behavior:
++//   - whitespace splits arguments unless inside quotes
++//   - single and double quotes group text and are removed from output
++//   - backslash escapes the next rune outside single quotes
++//   - unmatched quote or trailing backslash returns an error
++//
++// This is intentionally not a full shell parser: no variable expansion,
++// command substitution, glob expansion, or other shell features. Also, a
++// standalone empty quoted token (for example '') is currently dropped.
++func splitGitLogOpts(input string) ([]string, error) {
++	var (
++		args     []string
++		curr     strings.Builder
++		inSingle bool
++		inDouble bool
++		escaped  bool
++	)
++
++	flush := func() {
++		if curr.Len() == 0 {
++			return
++		}
++		args = append(args, curr.String())
++		curr.Reset()
++	}
++
++	for _, r := range input {
++		switch {
++		case escaped:
++			curr.WriteRune(r)
++			escaped = false
++		case r == '\\' && !inSingle:
++			escaped = true
++		case r == '\'' && !inDouble:
++			inSingle = !inSingle
++		case r == '"' && !inSingle:
++			inDouble = !inDouble
++		case unicode.IsSpace(r) && !inSingle && !inDouble:
++			flush()
++		default:
++			curr.WriteRune(r)
++		}
++	}
++
++	if escaped {
++		return nil, errors.New("unterminated escape in --log-opts")
++	}
++	if inSingle || inDouble {
++		return nil, errors.New("unterminated quote in --log-opts")
++	}
++
++	flush()
++	return args, nil
++}
++
+diff --git a/sources/parallel_git.go b/sources/parallel_git.go
+index 76cafd2..d0c2faa 100644
+--- a/sources/parallel_git.go
++++ b/sources/parallel_git.go
+@@ -130,9 +130,3 @@ func newGitLogCmd(ctx context.Context, source string, logOpts string) (*GitCmd,
+-		userArgs := strings.Split(logOpts, " ")
+-		var quotedOpts []string
+-		for _, element := range userArgs {
+-			if quotedOptPattern.MatchString(element) {
+-				quotedOpts = append(quotedOpts, element)
+-			}
+-		}
+-		if len(quotedOpts) > 0 {
+-			logging.Warn().Msgf("the following `--log-opts` values may not work as expected: %v", quotedOpts)
++		userArgs, err := splitGitLogOpts(logOpts)
++		if err != nil {
++			return nil, fmt.Errorf("invalid --log-opts: %w", err)
+@@ -244 +238,5 @@ func listCommits(ctx context.Context, source string, logOpts string) ([]string,
+-		args = append(args, strings.Split(logOpts, " ")...)
++		userArgs, err := splitGitLogOpts(logOpts)
++		if err != nil {
++			return nil, fmt.Errorf("invalid --log-opts: %w", err)
++		}
++		args = append(args, userArgs...)
+@@ -269 +267,5 @@ func commitCount(ctx context.Context, source string, logOpts string) (int, error
+-		args = append(args, strings.Split(logOpts, " ")...)
++		userArgs, err := splitGitLogOpts(logOpts)
++		if err != nil {
++			return 0, fmt.Errorf("invalid --log-opts: %w", err)
++		}
++		args = append(args, userArgs...)
+
+commit b76f26696b51231d39afcaf98e22261aa05d267d
+Author: Zachary Rice <15034943+zricethezav@users.noreply.github.com>
+Date:   Thu Jul 2 09:27:35 2026 -0400
+
+    Some Azure Rules (#222)
+    
+    * azure rules
+    
+    * rm keyword
+    
+    * overrides
+    
+    * test comment
+
+diff --git a/cmd/generate/config/main.go b/cmd/generate/config/main.go
+index 0e5b401..c64d9cb 100644
+--- a/cmd/generate/config/main.go
++++ b/cmd/generate/config/main.go
+@@ -110,0 +111,2 @@ func main() {
++		rules.AzureTenantID(),
++		rules.AzureClientID(),
+@@ -111,0 +114,4 @@ func main() {
++		rules.AzureStorageAccountName(),
++		rules.AzureStorageAccountKey(),
++		rules.AzureAppConfigurationConnectionString(),
++		rules.AzureServiceBusConnectionString(),
+diff --git a/cmd/generate/config/rules/azure.go b/cmd/generate/config/rules/azure.go
+index 2a62883..a261c32 100644
+--- a/cmd/generate/config/rules/azure.go
++++ b/cmd/generate/config/rules/azure.go
+@@ -11,0 +12,24 @@ import (
++func AzureTenantID() *config.Rule {
++	r := config.Rule{
++		RuleID:      "azure-tenant-id",
++		Description: "Detected an Azure tenant ID, used as a component of Azure service principal validation.",
++		Regex:       regexp.MustCompile(`(?i)\b(?:tenant[_\s.-]*(?:id)?|AZURE_TENANT_ID)\b(?s:.{0,24}?)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`),
++		Keywords:    []string{"tenant"},
++		SkipReport:  true,
++		Filter:      `entropy(finding["secret"]) <= 2.5`,
++	}
++	return utils.Validate(r, []string{`azure_tenant_id=72f988bf-86f1-41af-91ab-2d7cd011db47`}, nil)
++}
++
++func AzureClientID() *config.Rule {
++	r := config.Rule{
++		RuleID:      "azure-client-id",
++		Description: "Detected an Azure client ID, used as a component of Azure service principal validation.",
++		Regex:       regexp.MustCompile(`(?i)\b(?:client[_\s.-]*id|AZURE_CLIENT_ID)\b(?s:.{0,24}?)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`),
++		Keywords:    []string{"client"},
++		SkipReport:  true,
++		Filter:      `entropy(finding["secret"]) <= 2.5`,
++	}
++	return utils.Validate(r, []string{`azure_client_id=f47ac10b-58cc-4372-a567-0e02b2c3d479`}, nil)
++}
++
+@@ -29,0 +54,14 @@ func AzureActiveDirectoryClientSecret() *config.Rule {
++		RequiredRules: []*config.Required{
++			{RuleID: "azure-tenant-id", WithinLines: utils.Ptr(8)},
++			{RuleID: "azure-client-id", WithinLines: utils.Ptr(8)},
++		},
++		ValidateExpr: `let r = azure.validateServicePrincipal(captures["azure-tenant-id"], captures["azure-client-id"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "tenant_id": r.tenant_id,
++  "client_id": r.client_id
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++`,
+@@ -35 +73 @@ func AzureActiveDirectoryClientSecret() *config.Rule {
+-		`client_secret=bP88Q~rcBcYjzzOhg1Hnn76Wm3jGgakZiZ.8vMgR`, // gitleaks:allow
++		`client_secret=bP88Q~rcBcYjzzOhg1Hnn76Wm3jGgakZiZ.8vMgR`,
+@@ -37,15 +75,15 @@ func AzureActiveDirectoryClientSecret() *config.Rule {
+-`, // gitleaks:allow
+-		`client_secret: .IQ8Q~79R7TOWOspFnWcEG-dYt4KXqFqxK16cxr`,                                                                                              // gitleaks:allow
+-		`AUTH_CLIENTSECRET = _V28Q~IC8qxmlWNpHuDm34JlbKv9LXV5MvUR3a-P`,                                                                                        // gitleaks:allow
+-		`<value xsi:type="xsd:string">~Gg8Q~nVhlLi2vpg_nXBGqFsbGK-t~Hus1JmTa0y</value>`,                                                                       // gitleaks:allow
+-		`"CLIENT_SECRET": "YYz7Q~Sudoqwap1PnzEBA3zqBK~i5uesDIv.C"`,                                                                                            // gitleaks:allow
+-		`Set-PSUAuthenticationMethod -Type 'OpenIDConnect' -CallbackPath '/auth/oidc' -ClientId 'fake' -ClientSecret '2Vq7Q~q5VgKljZ7cb3.0sp0Apz.vOjRIPyeTr'`, // gitleaks:allow
+-		`client-secret: "t028Q~-aLbmQuinnZtzbgtlEAYstnBWEmGPAoBm"`,                                                                                            // gitleaks:allow
+-		`"cas.authn.azure-active-directory.client-secret=qHF8Q~PCM5HhMoyTFc5TYEomnzR6Kim9UJhe8a.P",`,                                                          // gitleaks:allow
+-		`"line": "client_srt = \"qpF8Q~PCM5MhMoyTFc5TYEomnYRUKim9UJhe8a2P\";",`,                                                                               // gitleaks:allow
+-		`"client_secret":       acctest.Representation{RepType: acctest.Required, Create: 'dO29Q~F5-VwnW.lZdd11xFF_t5NAXCaGwDl9NbT1'},`,                       // gitleaks:allow
+-		`Example= GN.7Q~4AkLZBNEbz4Jxlm~O5G6SsyFxYg6zMR`,                                                                                                      // gitleaks:allow
+-		`"the_value": "QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn"`,                                                                                             // gitleaks:allow
+-		`QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn`,                                                                                                            // gitleaks:allow
+-		`(use the client secret: QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn)`,                                                                                   // gitleaks:allow
+-		`(QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn)`,                                                                                                          // gitleaks:allow
++`,
++		`client_secret: .IQ8Q~79R7TOWOspFnWcEG-dYt4KXqFqxK16cxr`,
++		`AUTH_CLIENTSECRET = _V28Q~IC8qxmlWNpHuDm34JlbKv9LXV5MvUR3a-P`,
++		`<value xsi:type="xsd:string">~Gg8Q~nVhlLi2vpg_nXBGqFsbGK-t~Hus1JmTa0y</value>`,
++		`"CLIENT_SECRET": "YYz7Q~Sudoqwap1PnzEBA3zqBK~i5uesDIv.C"`,
++		`Set-PSUAuthenticationMethod -Type 'OpenIDConnect' -CallbackPath '/auth/oidc' -ClientId 'fake' -ClientSecret '2Vq7Q~q5VgKljZ7cb3.0sp0Apz.vOjRIPyeTr'`,
++		`client-secret: "t028Q~-aLbmQuinnZtzbgtlEAYstnBWEmGPAoBm"`,
++		`"cas.authn.azure-active-directory.client-secret=qHF8Q~PCM5HhMoyTFc5TYEomnzR6Kim9UJhe8a.P",`,
++		`"line": "client_srt = \"qpF8Q~PCM5MhMoyTFc5TYEomnYRUKim9UJhe8a2P\";",`,
++		`"client_secret":       acctest.Representation{RepType: acctest.Required, Create: 'dO29Q~F5-VwnW.lZdd11xFF_t5NAXCaGwDl9NbT1'},`,
++		`Example= GN.7Q~4AkLZBNEbz4Jxlm~O5G6SsyFxYg6zMR`,
++		`"the_value": "QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn"`,
++		`QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn`,
++		`(use the client secret: QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn)`,
++		`(QtT8Q~9C-_Ij~RouHVpD2Tuf3oHWGh.DQ3kcjbAn)`,
+@@ -55,8 +92,0 @@ func AzureActiveDirectoryClientSecret() *config.Rule {
+-		`![图源：《深入拆解Tomcat & Jetty》](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/6a9e704af49b4380bb686f0c96d33b81~tplv-k3u1fbpfcp-watermark.image)`,
+-		`~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`,
+-		`~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`,
+-		`.ui.visible.right.sidebar~.ui.visible.left.sidebar~.pusher{transform:translate3d(0,0,0)}`,
+-		`buf.WriteString("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n::\n\n")`,
+-		`'url': 'http://www.2doc.nl/speel~VARA_101375237~mh17-het-verdriet-van-nederland~.html',`,
+-		`@ar = split("~", "965f1453~47~09414c93e4cef985416f472549220827da3ba6fed8ad28e29ef6ad170ad53a69051e9b06f439ef6da5df8670181f7eb2481650");`,
+-		`'#!/registries/5/portainer.demo~2Fportainerregistrytesting~2Falpine',`,
+@@ -68,0 +99,90 @@ func AzureActiveDirectoryClientSecret() *config.Rule {
++
++func AzureStorageAccountName() *config.Rule {
++	r := config.Rule{
++		RuleID:      "azure-storage-account-name",
++		Description: "Detected an Azure Storage account name, used as a component of Azure Storage key validation.",
++		Regex:       regexp.MustCompile(`(?i)(?:\bAccountName\s*=\s*([a-z0-9]{3,24})\b|https://([a-z0-9]{3,24})\.blob\.core\.windows\.net\b|\b(?:azure[_\s.-]*storage[_\s.-]*(?:account[_\s.-]*)?name|storage[_\s.-]*account[_\s.-]*name)\b(?s:.{0,24}?)([a-z0-9]{3,24})\b)`),
++		Keywords:    []string{"AccountName", "blob.core.windows.net", "storage"},
++		SkipReport:  true,
++		Filter:      `entropy(finding["secret"]) <= 1.5`,
++	}
++	storageKey := azureStorageKeySample()
++	return utils.Validate(r, []string{
++		`AccountName=mystorageaccount;AccountKey=` + storageKey,
++		`https://prodlogs.blob.core.windows.net/container`,
++		`AZURE_STORAGE_ACCOUNT_NAME=prodblob2024`,
++	}, nil)
++}
++
++func AzureStorageAccountKey() *config.Rule {
++	r := config.Rule{
++		RuleID:      "azure-storage-account-key",
++		Description: "Detected an Azure Storage account key.",
++		Regex:       regexp.MustCompile(`(?i)\b(?:AccountKey|(?:azure[_\s.-]*)?(?:storage[_\s.-]*)?(?:account[_\s.-]*)?(?:access[_\s.-]*)?key)\b(?s:.{0,24}?)([A-Za-z0-9+/]{86}==)`),
++		Keywords:    []string{"AccountKey", "storage", "key"},
++		RequiredRules: []*config.Required{
++			{RuleID: "azure-storage-account-name", WithinLines: utils.Ptr(8)},
++		},
++		ValidateExpr: `let r = azure.validateStorage(captures["azure-storage-account-name"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "account": r.account,
++  "containers": r.containers
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++`,
++		Filter: `entropy(finding["secret"]) <= 4.0`,
++	}
++	return utils.Validate(r, []string{`AccountName=mystorageaccount;AccountKey=` + azureStorageKeySample()}, nil)
++}
++
++func AzureAppConfigurationConnectionString() *config.Rule {
++	r := config.Rule{
++		RuleID:      "azure-app-configuration-connection-string",
++		Description: "Detected an Azure App Configuration connection string.",
++		Regex:       regexp.MustCompile(`(?i)Endpoint=(?P<azure_appconfig_endpoint>https://[a-z0-9-]+\.azconfig\.io);Id=(?P<azure_appconfig_id>[^;\s'"]{4,80});Secret=([A-Za-z0-9+/]{36,100}={0,2})`),
++		SecretGroup: 3,
++		Keywords:    []string{"azconfig.io", "Endpoint=", "Secret="},
++		ValidateExpr: `let r = azure.validateAppConfig(captures["azure_appconfig_endpoint"], captures["azure_appconfig_id"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "endpoint": r.endpoint,
++  "id": r.id
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++`,
++		Filter: `entropy(finding["secret"]) <= 3.5`,
++	}
++	return utils.Validate(r, []string{
++		`Endpoint=https://foo-nonprod-appconfig.azconfig.io;Id=ABCD-E6-s0:tl6ABcdefGHi7kLMno/p;Secret=` + secrets.NewSecretWithEntropy(`[A-Za-z0-9+/]{44}=`, 3.5),
++	}, nil)
++}
++
++func AzureServiceBusConnectionString() *config.Rule {
++	r := config.Rule{
++		RuleID:      "azure-servicebus-connection-string",
++		Description: "Detected an Azure Service Bus or Event Hub shared access connection string.",
++		Regex:       regexp.MustCompile(`(?i)(Endpoint=sb://[a-z0-9-]+\.servicebus\.windows\.net/;SharedAccessKeyName=[^;=\s'"]{1,128};SharedAccessKey=[A-Za-z0-9+/]{32,100}={0,2}(?:;EntityPath=[^;\s'"]{1,128})?)`),
++		Keywords:    []string{"Endpoint=sb://", "SharedAccessKey"},
++		ValidateExpr: `let r = azure.validateServiceBusSAS(finding["secret"]); r.status in [200, 201, 202, 204] ? {
++  "result": "valid",
++  "host": r.host,
++  "entity_path": r.entity_path
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++`,
++		Filter: `entropy(finding["secret"]) <= 3.0`,
++	}
++	return utils.Validate(r, []string{`Endpoint=sb://orders-prod.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=` + secrets.NewSecretWithEntropy(`[A-Za-z0-9+/]{56}`, 3.5) + `;EntityPath=orders`}, nil)
++}
++
++func azureStorageKeySample() string {
++	return secrets.NewSecretWithEntropy(`[A-Za-z0-9+/]{86}`, 4) + "=="
++}
+diff --git a/config/betterleaks.toml b/config/betterleaks.toml
+index 6dcb1d7..d42ea76 100644
+--- a/config/betterleaks.toml
++++ b/config/betterleaks.toml
+@@ -702,0 +703,87 @@ keywords = [
++validate = '''
++let r = azure.validateServicePrincipal(captures["azure-tenant-id"], captures["azure-client-id"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "tenant_id": r.tenant_id,
++  "client_id": r.client_id
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++
++'''
++filter = '''
++entropy(finding["secret"]) <= 3.0
++'''
++[[rules.required]]
++id = "azure-tenant-id"
++withinLines = 8
++[[rules.required]]
++id = "azure-client-id"
++withinLines = 8
++
++# ──────────────────────────────────────────────────────────────────────────────
++# azure-app-configuration-connection-string
++# ──────────────────────────────────────────────────────────────────────────────
++[[rules]]
++id = "azure-app-configuration-connection-string"
++description = "Detected an Azure App Configuration connection string."
++regex = '''(?i)Endpoint=(?P<azure_appconfig_endpoint>https://[a-z0-9-]+\.azconfig\.io);Id=(?P<azure_appconfig_id>[^;\s'"]{4,80});Secret=([A-Za-z0-9+/]{36,100}={0,2})'''
++secretGroup = 3
++keywords = [
++    "azconfig.io",
++    "endpoint=",
++    "secret=",
++]
++validate = '''
++let r = azure.validateAppConfig(captures["azure_appconfig_endpoint"], captures["azure_appconfig_id"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "endpoint": r.endpoint,
++  "id": r.id
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++
++'''
++filter = '''
++entropy(finding["secret"]) <= 3.5
++'''
++
++# ──────────────────────────────────────────────────────────────────────────────
++# azure-client-id
++# ──────────────────────────────────────────────────────────────────────────────
++[[rules]]
++id = "azure-client-id"
++description = "Detected an Azure client ID, used as a component of Azure service principal validation."
++regex = '''(?i)\b(?:client[_\s.-]*id|AZURE_CLIENT_ID)\b(?s:.{0,24}?)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'''
++keywords = ["client"]
++skipReport = true
++filter = '''
++entropy(finding["secret"]) <= 2.5
++'''
++
++# ──────────────────────────────────────────────────────────────────────────────
++# azure-servicebus-connection-string
++# ──────────────────────────────────────────────────────────────────────────────
++[[rules]]
++id = "azure-servicebus-connection-string"
++description = "Detected an Azure Service Bus or Event Hub shared access connection string."
++regex = '''(?i)(Endpoint=sb://[a-z0-9-]+\.servicebus\.windows\.net/;SharedAccessKeyName=[^;=\s'"]{1,128};SharedAccessKey=[A-Za-z0-9+/]{32,100}={0,2}(?:;EntityPath=[^;\s'"]{1,128})?)'''
++keywords = [
++    "endpoint=sb://",
++    "sharedaccesskey",
++]
++validate = '''
++let r = azure.validateServiceBusSAS(finding["secret"]); r.status in [200, 201, 202, 204] ? {
++  "result": "valid",
++  "host": r.host,
++  "entity_path": r.entity_path
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++
++'''
+@@ -706,0 +794,61 @@ entropy(finding["secret"]) <= 3.0
++# ──────────────────────────────────────────────────────────────────────────────
++# azure-storage-account-key
++# ──────────────────────────────────────────────────────────────────────────────
++[[rules]]
++id = "azure-storage-account-key"
++description = "Detected an Azure Storage account key."
++regex = '''(?i)\b(?:AccountKey|(?:azure[_\s.-]*)?(?:storage[_\s.-]*)?(?:account[_\s.-]*)?(?:access[_\s.-]*)?key)\b(?s:.{0,24}?)([A-Za-z0-9+/]{86}==)'''
++keywords = [
++    "accountkey",
++    "storage",
++    "key",
++]
++validate = '''
++let r = azure.validateStorage(captures["azure-storage-account-name"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "account": r.account,
++  "containers": r.containers
++} : r.status in [400, 401, 403, 404] ? {
++  "result": "invalid",
++  "error_code": r.error_code,
++  "error_message": r.error_message
++} : validate.unknown(r)
++
++'''
++filter = '''
++entropy(finding["secret"]) <= 4.0
++'''
++[[rules.required]]
++id = "azure-storage-account-name"
++withinLines = 8
++
++# ──────────────────────────────────────────────────────────────────────────────
++# azure-storage-account-name
++# ──────────────────────────────────────────────────────────────────────────────
++[[rules]]
++id = "azure-storage-account-name"
++description = "Detected an Azure Storage account name, used as a component of Azure Storage key validation."
++regex = '''(?i)(?:\bAccountName\s*=\s*([a-z0-9]{3,24})\b|https://([a-z0-9]{3,24})\.blob\.core\.windows\.net\b|\b(?:azure[_\s.-]*storage[_\s.-]*(?:account[_\s.-]*)?name|storage[_\s.-]*account[_\s.-]*name)\b(?s:.{0,24}?)([a-z0-9]{3,24})\b)'''
++keywords = [
++    "accountname",
++    "blob.core.windows.net",
++    "storage",
++]
++skipReport = true
++filter = '''
++entropy(finding["secret"]) <= 1.5
++'''
++
++# ──────────────────────────────────────────────────────────────────────────────
++# azure-tenant-id
++# ──────────────────────────────────────────────────────────────────────────────
++[[rules]]
++id = "azure-tenant-id"
++description = "Detected an Azure tenant ID, used as a component of Azure service principal validation."
++regex = '''(?i)\b(?:tenant[_\s.-]*(?:id)?|AZURE_TENANT_ID)\b(?s:.{0,24}?)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'''
++keywords = ["tenant"]
++skipReport = true
++filter = '''
++entropy(finding["secret"]) <= 2.5
++'''
++
+diff --git a/docs/config.md b/docs/config.md
+index a046676..d557cc7 100644
+--- a/docs/config.md
++++ b/docs/config.md
+@@ -142,0 +143,4 @@ Any additional keys are attached to the finding as validation metadata, such as
++| `azure.validateStorage(account, key)` | Makes a SharedKey-signed Azure Storage request to validate an account key. |
++| `azure.validateServicePrincipal(tenant, client, secret)` | Requests a Microsoft identity token to validate an Azure service principal secret. |
++| `azure.validateAppConfig(endpoint, id, secret)` | Makes an HMAC-signed Azure App Configuration request to validate a connection string. |
++| `azure.validateServiceBusSAS(connectionString)` | Makes a SAS-authenticated Azure Service Bus/Event Hub request to validate a connection string. |
+diff --git a/internal/exprruntime/bindings_azure.go b/internal/exprruntime/bindings_azure.go
+new file mode 100644
+index 0000000..9911bd0
+--- /dev/null
++++ b/internal/exprruntime/bindings_azure.go
+@@ -0,0 +1,360 @@
++package exprruntime
++
++import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"encoding/xml"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"regexp"
++	"strings"
++	"time"
++)
++
++const (
++	azureStorageVersion   = "2023-11-03"
++	azureAppConfigVersion = "1.0"
++)
++
++var azureTenantPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$`)
++
++func azureNamespace(rt *runtimeBindings) map[string]any {
++	return map[string]any{
++		"validateStorage":          rt.azureValidateStorage,
++		"validateServicePrincipal": rt.azureValidateServicePrincipal,
++		"validateAppConfig":        rt.azureValidateAppConfig,
++		"validateServiceBusSAS":    rt.azureValidateServiceBusSAS,
++	}
++}
++
++type azureStorageListResponse struct {
++	Containers []struct {
++		Name string `xml:"Name"`
++	} `xml:"Containers>Container"`
++}
++
++type azureErrorResponse struct {
++	Code    string `xml:"Code"`
++	Message string `xml:"Message"`
++}
++
++func (rt *runtimeBindings) azureValidateStorage(account, accountKey string) map[string]any {
++	e := rt.validation
++	if e == nil {
++		e, _ = New(nil)
++	}
++	account = strings.TrimSpace(account)
++	accountKey = strings.TrimSpace(accountKey)
++	if account == "" || accountKey == "" {
++		return azureInputError("missing_storage_account_or_key")
++	}
++
++	now := time.Now().UTC().Format(http.TimeFormat)
++	endpoint := fmt.Sprintf("https://%s.blob.core.windows.net/?comp=list", account)
++	if e.AzureStorageEndpoint != "" {
++		endpoint = e.AzureStorageEndpoint
++	}
++	canonHeaders := fmt.Sprintf("x-ms-date:%s\nx-ms-version:%s\n", now, azureStorageVersion)
++	stringToSign := fmt.Sprintf("GET\n\n\n\n\n\n\n\n\n\n\n\n%s/%s/\ncomp:list", canonHeaders, account)
++	signature, err := azureHMACBase64(accountKey, stringToSign)
++	if err != nil {
++		return azureInputError(err.Error())
++	}
++
++	req, err := http.NewRequestWithContext(rt.ctx, http.MethodGet, endpoint, nil)
++	if err != nil {
++		return map[string]any{"status": int64(0), "error_message": err.Error()}
++	}
++	req.Header.Set("x-ms-date", now)
++	req.Header.Set("x-ms-version", azureStorageVersion)
++	req.Header.Set("Authorization", fmt.Sprintf("SharedKey %s:%s", account, signature))
++
++	body, resp, result := rt.azureDo(e, req)
++	if result != nil {
++		return result
++	}
++	out := map[string]any{"status": int64(resp.StatusCode), "account": account}
++	if resp.StatusCode == http.StatusOK {
++		var parsed azureStorageListResponse
++		if err := xml.Unmarshal(body, &parsed); err == nil {
++			containers := make([]any, 0, len(parsed.Containers))
++			for _, c := range parsed.Containers {
++				containers = append(containers, c.Name)
++			}
++			out["containers"] = containers
++		}
++	} else {
++		azureAddXMLError(out, body)
++	}
++	return out
++}
++
++func (rt *runtimeBindings) azureValidateServicePrincipal(tenantID, clientID, clientSecret string) map[string]any {
++	e := rt.validation
++	if e == nil {
++		e, _ = New(nil)
++	}
++	tenantID = strings.TrimSpace(tenantID)
++	clientID = strings.TrimSpace(clientID)
++	clientSecret = strings.TrimSpace(clientSecret)
++	if tenantID == "" || clientID == "" || clientSecret == "" {
++		return azureInputError("missing_service_principal_fields")
++	}
++	if !azureTenantPattern.MatchString(tenantID) {
++		return azureInputError("invalid_tenant_id")
++	}
++
++	endpoint := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", url.PathEscape(tenantID))
++	if e.AzureTokenEndpoint != "" {
++		endpoint = e.AzureTokenEndpoint
++	}
++	form := url.Values{
++		"client_id":     {clientID},
++		"client_secret": {clientSecret},
++		"grant_type":    {"client_credentials"},
++		"scope":         {"https://management.azure.com/.default"},
++	}
++	body := form.Encode()
++	req, err := http.NewRequestWithContext(rt.ctx, http.MethodPost, endpoint, strings.NewReader(body))
++	if err != nil {
++		return map[string]any{"status": int64(0), "error_message": err.Error()}
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	req.Header.Set("Accept", "application/json")
++
++	respBody, resp, result := rt.azureDo(e, req)
++	if result != nil {
++		return result
++	}
++	out := map[string]any{"status": int64(resp.StatusCode), "tenant_id": tenantID, "client_id": clientID}
++	azureAddJSONError(out, respBody)
++	var parsed map[string]any
++	if resp.StatusCode == http.StatusOK && json.Unmarshal(respBody, &parsed) == nil {
++		if _, ok := parsed["access_token"].(string); !ok {
++			out["status"] = int64(0)
++			out["error_code"] = "missing_access_token"
++		}
++	}
++	return out
++}
++
++func (rt *runtimeBindings) azureValidateAppConfig(endpoint, id, secret string) map[string]any {
++	e := rt.validation
++	if e == nil {
++		e, _ = New(nil)
++	}
++	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
++	id = strings.TrimSpace(id)
++	secret = strings.TrimSpace(secret)
++	if endpoint == "" || id == "" || secret == "" {
++		return azureInputError("missing_app_config_fields")
++	}
++	u, err := url.Parse(endpoint)
++	if err != nil || u.Host == "" {
++		return azureInputError("invalid_app_config_endpoint")
++	}
++	reqURL := endpoint + "/kv?api-version=" + azureAppConfigVersion
++	signHost := u.Host
++	signPath := "/kv?api-version=" + azureAppConfigVersion
++	if e.AzureAppConfigEndpoint != "" {
++		reqURL = e.AzureAppConfigEndpoint
++		overrideURL, err := url.Parse(reqURL)
++		if err != nil || overrideURL.Host == "" {
++			return azureInputError("invalid_app_config_endpoint")
++		}
++		signHost = overrideURL.Host
++		signPath = overrideURL.EscapedPath()
++		if signPath == "" {
++			signPath = "/"
++		}
++		if overrideURL.RawQuery != "" {
++			signPath += "?" + overrideURL.RawQuery
++		}
++	}
++	date := time.Now().UTC().Format(http.TimeFormat)
++	contentHash := base64.StdEncoding.EncodeToString(sha256.New().Sum(nil))
++	stringToSign := fmt.Sprintf("GET\n%s\n%s;%s;%s", signPath, date, signHost, contentHash)
++	signature, err := azureHMACBase64(secret, stringToSign)
++	if err != nil {
++		return azureInputError(err.Error())
++	}
++
++	req, err := http.NewRequestWithContext(rt.ctx, http.MethodGet, reqURL, nil)
++	if err != nil {
++		return map[string]any{"status": int64(0), "error_message": err.Error()}
++	}
++	req.Host = signHost
++	req.Header.Set("Date", date)
++	req.Header.Set("x-ms-content-sha256", contentHash)
++	req.Header.Set("Authorization", fmt.Sprintf("HMAC-SHA256 Credential=%s&SignedHeaders=date;host;x-ms-content-sha256&Signature=%s", id, signature))
++
++	body, resp, result := rt.azureDo(e, req)
++	if result != nil {
++		return result
++	}
++	out := map[string]any{"status": int64(resp.StatusCode), "endpoint": endpoint, "id": id}
++	azureAddJSONError(out, body)
++	return out
++}
++
++func (rt *runtimeBindings) azureValidateServiceBusSAS(connectionString string) map[string]any {
++	e := rt.validation
++	if e == nil {
++		e, _ = New(nil)
++	}
++	fields := parseAzureConnectionString(connectionString)
++	endpoint, keyName, key := fields["endpoint"], fields["sharedaccesskeyname"], fields["sharedaccesskey"]
++	if endpoint == "" || keyName == "" || key == "" {
++		return azureInputError("missing_servicebus_connection_fields")
++	}
++	u, err := url.Parse(endpoint)
++	if err != nil || u.Host == "" {
++		return azureInputError("invalid_servicebus_endpoint")
++	}
++	host := u.Host
++	path := strings.Trim(fields["entitypath"], "/")
++	resourceURI := fmt.Sprintf("https://%s", host)
++	reqURL := fmt.Sprintf("https://%s/", host)
++	if path != "" {
++		resourceURI = fmt.Sprintf("https://%s/%s", host, url.PathEscape(path))
++		reqURL = resourceURI + "?api-version=2017-04"
++	} else {
++		reqURL = fmt.Sprintf("https://%s/$Resources/Queues?api-version=2021-05", host)
++	}
++	if e.AzureServiceBusEndpoint != "" {
++		reqURL = e.AzureServiceBusEndpoint
++		overrideURL, err := url.Parse(reqURL)
++		if err != nil || overrideURL.Host == "" {
++			return azureInputError("invalid_servicebus_endpoint")
++		}
++		overrideURL.RawQuery = ""
++		overrideURL.Fragment = ""
++		resourceURI = overrideURL.String()
++	}
++	auth, err := azureSASToken(resourceURI, keyName, key, time.Now().Add(5*time.Minute).Unix())
++	if err != nil {
++		return azureInputError(err.Error())
++	}
++	req, err := http.NewRequestWithContext(rt.ctx, http.MethodGet, reqURL, nil)
++	if err != nil {
++		return map[string]any{"status": int64(0), "error_message": err.Error()}
++	}
++	req.Header.Set("Authorization", auth)
++	req.Header.Set("Accept", "application/atom+xml, application/json")
++
++	body, resp, result := rt.azureDo(e, req)
++	if result != nil {
++		return result
++	}
++	out := map[string]any{"status": int64(resp.StatusCode), "host": host}
++	if path != "" {
++		out["entity_path"] = path
++	}
++	azureAddXMLError(out, body)
++	azureAddJSONError(out, body)
++	return out
++}
++
++func parseAzureConnectionString(s string) map[string]string {
++	out := map[string]string{}
++	for _, part := range strings.Split(s, ";") {
++		k, v, ok := strings.Cut(part, "=")
++		if !ok {
++			continue
++		}
++		out[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
++	}
++	return out
++}
++
++func azureHMACBase64(base64Key, message string) (string, error) {
++	key, err := base64.StdEncoding.DecodeString(base64Key)
++	if err != nil {
++		return "", fmt.Errorf("invalid_base64_key")
++	}
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write([]byte(message))
++	return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
++}
++
++func azureSASToken(resourceURI, keyName, base64Key string, expiry int64) (string, error) {
++	encodedURI := strings.ToLower(url.QueryEscape(resourceURI))
++	toSign := encodedURI + "\n" + fmt.Sprintf("%d", expiry)
++	// Service Bus/Event Hub SAS signs the SharedAccessKey text as supplied.
++	mac := hmac.New(sha256.New, []byte(base64Key))
++	_, _ = mac.Write([]byte(toSign))
++	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
++	return fmt.Sprintf("SharedAccessSignature sr=%s&sig=%s&se=%d&skn=%s",
++		encodedURI,
++		url.QueryEscape(signature),
++		expiry,
++		url.QueryEscape(keyName),
++	), nil
++}
++
++func (rt *runtimeBindings) azureDo(e *Runtime, req *http.Request) ([]byte, *http.Response, map[string]any) {
++	resp, err := e.client.Do(req)
++	if err != nil {
++		if isAzureNXDomain(err) {
++			return nil, nil, map[string]any{"status": int64(404), "error_code": "NXDOMAIN", "error_message": err.Error()}
++		}
++		return nil, nil, map[string]any{"status": int64(0), "error_message": err.Error()}
++	}
++	defer resp.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
++	if err != nil {
++		return nil, resp, map[string]any{"status": int64(resp.StatusCode), "error_message": err.Error()}
++	}
++	rt.captureDebug(req.Method, req.URL.String(), "", req, resp, body)
++	return body, resp, nil
++}
++
++func isAzureNXDomain(err error) bool {
++	var dnsErr *net.DNSError
++	if errors.As(err, &dnsErr) {
++		return dnsErr.IsNotFound
++	}
++	return strings.Contains(strings.ToLower(err.Error()), "no such host")
++}
++
++func azureInputError(code string) map[string]any {
++	return map[string]any{"status": int64(400), "error_code": code}
++}
++
++func azureAddXMLError(out map[string]any, body []byte) {
++	var parsed azureErrorResponse
++	if err := xml.Unmarshal(body, &parsed); err != nil {
++		return
++	}
++	if parsed.Code != "" {
++		out["error_code"] = parsed.Code
++	}
++	if parsed.Message != "" {
++		out["error_message"] = parsed.Message
++	}
++}
++
++func azureAddJSONError(out map[string]any, body []byte) {
++	var parsed map[string]any
++	if err := json.Unmarshal(body, &parsed); err != nil {
++		return
++	}
++	for _, key := range []string{"error", "code", "Code"} {
++		if v, ok := parsed[key].(string); ok && v != "" {
++			out["error_code"] = v
++			break
++		}
++	}
++	for _, key := range []string{"error_description", "message", "Message"} {
++		if v, ok := parsed[key].(string); ok && v != "" {
++			out["error_message"] = v
++			break
++		}
++	}
++}
+diff --git a/internal/exprruntime/bindings_azure_test.go b/internal/exprruntime/bindings_azure_test.go
+new file mode 100644
+index 0000000..b997a4b
+--- /dev/null
++++ b/internal/exprruntime/bindings_azure_test.go
+@@ -0,0 +1,194 @@
++package exprruntime
++
++import (
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"testing"
++)
++
++const testAzureKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
++
++func TestAzureValidateStorageExprBindingValid(t *testing.T) {
++	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if got := r.URL.RawQuery; got != "comp=list" {
++			t.Errorf("unexpected query %q", got)
++		}
++		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "SharedKey acct:") {
++			t.Errorf("unexpected auth %q", got)
++		}
++		if got := r.Header.Get("x-ms-version"); got != azureStorageVersion {
++			t.Errorf("unexpected x-ms-version %q", got)
++		}
++		fmt.Fprint(w, `<EnumerationResults><Containers><Container><Name>logs</Name></Container></Containers></EnumerationResults>`)
++	}))
++	defer ts.Close()
++
++	env, err := New(ts.Client())
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	env.AzureStorageEndpoint = ts.URL + "/?comp=list"
++
++	prg, err := env.CompileValidation(`let r = azure.validateStorage(captures["account"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "account": r.account,
++  "containers": r.containers
++} : validate.unknown(r)`)
++	if err != nil {
++		t.Fatalf("compile: %v", err)
++	}
++	got, err := env.Eval(prg, map[string]string{"secret": testAzureKey}, map[string]string{"account": "acct"})
++	if err != nil {
++		t.Fatalf("eval: %v", err)
++	}
++	result := got.(map[string]any)
++	if result["result"] != "valid" {
++		t.Fatalf("expected valid, got %v", result)
++	}
++	if result["account"] != "acct" {
++		t.Errorf("unexpected account %v", result["account"])
++	}
++}
++
++func TestAzureValidateServicePrincipalInvalid(t *testing.T) {
++	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if err := r.ParseForm(); err != nil {
++			t.Fatalf("ParseForm: %v", err)
++		}
++		if got := r.Form.Get("grant_type"); got != "client_credentials" {
++			t.Errorf("unexpected grant_type %q", got)
++		}
++		if got := r.Form.Get("client_id"); got != "client-id" {
++			t.Errorf("unexpected client_id %q", got)
++		}
++		w.WriteHeader(http.StatusUnauthorized)
++		fmt.Fprint(w, `{"error":"invalid_client","error_description":"bad secret"}`)
++	}))
++	defer ts.Close()
++
++	env, err := New(ts.Client())
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	env.AzureTokenEndpoint = ts.URL
++
++	prg, err := env.CompileValidation(`let r = azure.validateServicePrincipal(captures["tenant"], captures["client"], finding["secret"]); r.status in [400, 401, 403] ? {
++  "result": "invalid",
++  "error_code": r.error_code
++} : validate.unknown(r)`)
++	if err != nil {
++		t.Fatalf("compile: %v", err)
++	}
++	got, err := env.Eval(prg, map[string]string{"secret": "client-secret"}, map[string]string{"tenant": "tenant.example", "client": "client-id"})
++	if err != nil {
++		t.Fatalf("eval: %v", err)
++	}
++	result := got.(map[string]any)
++	if result["result"] != "invalid" || result["error_code"] != "invalid_client" {
++		t.Fatalf("unexpected result %v", result)
++	}
++}
++
++func TestAzureValidateAppConfigValid(t *testing.T) {
++	var serverHost string
++	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if got := r.URL.String(); got != "/custom-kv?api-version=test" {
++			t.Errorf("unexpected URL %q", got)
++		}
++		if got := r.Host; got != serverHost {
++			t.Errorf("unexpected host %q", got)
++		}
++		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "HMAC-SHA256 Credential=id123") {
++			t.Errorf("unexpected auth %q", got)
++		}
++		fmt.Fprint(w, `{"items":[]}`)
++	}))
++	defer ts.Close()
++	serverHost = strings.TrimPrefix(ts.URL, "http://")
++
++	env, err := New(ts.Client())
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	env.AzureAppConfigEndpoint = ts.URL + "/custom-kv?api-version=test"
++
++	prg, err := env.CompileValidation(`let r = azure.validateAppConfig(captures["endpoint"], captures["id"], finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "id": r.id
++} : validate.unknown(r)`)
++	if err != nil {
++		t.Fatalf("compile: %v", err)
++	}
++	got, err := env.Eval(prg, map[string]string{"secret": testAzureKey}, map[string]string{"endpoint": "https://demo.azconfig.io", "id": "id123"})
++	if err != nil {
++		t.Fatalf("eval: %v", err)
++	}
++	result := got.(map[string]any)
++	if result["result"] != "valid" || result["id"] != "id123" {
++		t.Fatalf("unexpected result %v", result)
++	}
++}
++
++func TestAzureValidateServiceBusSASValid(t *testing.T) {
++	var expectedResource string
++	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "SharedAccessSignature ") {
++			t.Errorf("unexpected auth %q", got)
++		} else if strings.Contains(got, "api-version") {
++			t.Errorf("SAS resource URI should not include query string: %q", got)
++		} else if sr := serviceBusSASResource(t, got); sr != expectedResource {
++			t.Errorf("unexpected SAS resource URI %q", sr)
++		}
++		if got := r.URL.Path; got != "/orders" {
++			t.Errorf("unexpected path %q", got)
++		}
++		fmt.Fprint(w, `<entry></entry>`)
++	}))
++	defer ts.Close()
++	expectedResource = ts.URL + "/orders"
++
++	env, err := New(ts.Client())
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	env.AzureServiceBusEndpoint = ts.URL + "/orders?api-version=2017-04"
++	conn := "Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=" + testAzureKey + ";EntityPath=orders"
++
++	prg, err := env.CompileValidation(`let r = azure.validateServiceBusSAS(finding["secret"]); r.status == 200 ? {
++  "result": "valid",
++  "entity_path": r.entity_path
++} : validate.unknown(r)`)
++	if err != nil {
++		t.Fatalf("compile: %v", err)
++	}
++	got, err := env.Eval(prg, map[string]string{"secret": conn}, nil)
++	if err != nil {
++		t.Fatalf("eval: %v", err)
++	}
++	result := got.(map[string]any)
++	if result["result"] != "valid" || result["entity_path"] != "orders" {
++		t.Fatalf("unexpected result %v", result)
++	}
++}
++
++func serviceBusSASResource(t *testing.T, auth string) string {
++	t.Helper()
++	values, err := url.ParseQuery(strings.TrimPrefix(auth, "SharedAccessSignature "))
++	if err != nil {
++		t.Fatalf("ParseQuery: %v", err)
++	}
++	return values.Get("sr")
++}
++
++func TestParseAzureConnectionString(t *testing.T) {
++	got := parseAzureConnectionString("Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=name;SharedAccessKey=key;EntityPath=events")
++	if got["endpoint"] != "sb://ns.servicebus.windows.net/" ||
++		got["sharedaccesskeyname"] != "name" ||
++		got["sharedaccesskey"] != "key" ||
++		got["entitypath"] != "events" {
++		t.Fatalf("unexpected parse: %v", got)
++	}
++}
+diff --git a/internal/exprruntime/runtime.go b/internal/exprruntime/runtime.go
+index 928fb87..8338d62 100644
+--- a/internal/exprruntime/runtime.go
++++ b/internal/exprruntime/runtime.go
+@@ -75,3 +75,8 @@ type Runtime struct {
+-	STSEndpoint      string
+-	GCPTokenEndpoint string
+-	AllowedEnv       map[string]struct{}
++	// These endpoints are used for tests, not for real scans.
++	STSEndpoint             string
++	GCPTokenEndpoint        string
++	AzureTokenEndpoint      string
++	AzureStorageEndpoint    string
++	AzureAppConfigEndpoint  string
++	AzureServiceBusEndpoint string
++	AllowedEnv              map[string]struct{}
+@@ -296,0 +302 @@ func (e *Runtime) validationBindings(ctx context.Context, finding, captures, att
++	b["azure"] = azureNamespace(rt)
+
+commit d0f00a38c30d6efc04ddca5732b6d980eda3e92a
+Author: Zach <15034943+zricethezav@users.noreply.github.com>
+Date:   Wed Jul 1 17:05:37 2026 -0400
+
+    consistent quoting
+
+diff --git a/cmd/generate/config/rules/generic_api_key_filter.go b/cmd/generate/config/rules/generic_api_key_filter.go
+index 7c05b71..c19f7f4 100644
+--- a/cmd/generate/config/rules/generic_api_key_filter.go
++++ b/cmd/generate/config/rules/generic_api_key_filter.go
+@@ -122 +122,2 @@ func buildTestAndPublicAPIFilters() string {
+-		secretMatch := `matchesAny(finding["secret"], [r"""^` + f.regex + `$"""])`
++		secretRegex := "`^" + f.regex + "$`"
++		secretMatch := `matchesAny(finding["secret"], [` + secretRegex + `])`
+@@ -124 +125 @@ func buildTestAndPublicAPIFilters() string {
+-			secretOnly = append(secretOnly, `r"""^`+f.regex+`$"""`)
++			secretOnly = append(secretOnly, secretRegex)
+diff --git a/config/betterleaks.toml b/config/betterleaks.toml
+index ad087ff..6dcb1d7 100644
+--- a/config/betterleaks.toml
++++ b/config/betterleaks.toml
+@@ -3710,20 +3710,20 @@ entropy(finding["secret"]) <= 3.5
+-  r"""^sb_publishable_[A-Za-z0-9_-]{31}$""",
+-  r"""^0x4AAAAAA[A-Za-z0-9_-]{15}$""",
+-  r"""^FCM[a-zA-Z0-9]{13}$""",
+-  r"""^ysc1_[A-Za-z0-9_-]{48}$""",
+-  r"""^phc_[A-Za-z0-9_-]{43,44}$""",
+-  r"""^APP_USR-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^access-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^asset-report-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^public-(sandbox|development|production)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^link-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^hbp_[0-9a-zA-Z]{36}$""",
+-  r"""^woos-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^(https://)?[0-9a-zA-Z]{32}\@sentry\.io$""",
+-  r"""^sub-c-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^pub-c-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^hc[a-z]ik_([a-z0-9]{26,58})$""",
+-  r"""^mob-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^public-token-test-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^public-token-live-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+-  r"""^pdl_sdbx_apikey_[a-z\d]{26}_[a-zA-Z\d]{22}_[a-zA-Z\d]{3}$"""
++  `^sb_publishable_[A-Za-z0-9_-]{31}$`,
++  `^0x4AAAAAA[A-Za-z0-9_-]{15}$`,
++  `^FCM[a-zA-Z0-9]{13}$`,
++  `^ysc1_[A-Za-z0-9_-]{48}$`,
++  `^phc_[A-Za-z0-9_-]{43,44}$`,
++  `^APP_USR-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^access-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^asset-report-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^public-(sandbox|development|production)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^link-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^hbp_[0-9a-zA-Z]{36}$`,
++  `^woos-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^(https://)?[0-9a-zA-Z]{32}\@sentry\.io$`,
++  `^sub-c-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^pub-c-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^hc[a-z]ik_([a-z0-9]{26,58})$`,
++  `^mob-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^public-token-test-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^public-token-live-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
++  `^pdl_sdbx_apikey_[a-z\d]{26}_[a-zA-Z\d]{22}_[a-zA-Z\d]{3}$`
+@@ -3731,47 +3731,47 @@ entropy(finding["secret"]) <= 3.5
+-|| (matchesAny(finding["secret"], [r"""^pk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
+-|| (matchesAny(finding["secret"], [r"""^rk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe"]))
+-|| (matchesAny(finding["secret"], [r"""^sk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
+-|| (matchesAny(finding["secret"], [r"""^pk_live_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
+-|| (matchesAny(finding["secret"], [r"""^pk_test_[A-Za-z0-9_-]{40}$"""]) && containsAny(finding["line"], ["paystack"]))
+-|| (matchesAny(finding["secret"], [r"""^sk_test_[A-Za-z0-9_-]{40}$"""]) && containsAny(finding["line"], ["paystack"]))
+-|| (matchesAny(finding["secret"], [r"""^pk_live_[A-Za-z0-9_-]{40}$"""]) && containsAny(finding["line"], ["paystack"]))
+-|| (matchesAny(finding["secret"], [r"""^sandbox_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}$"""]) && containsAny(finding["line"], ["braintree"]))
+-|| (matchesAny(finding["secret"], [r"""^production_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}$"""]) && containsAny(finding["line"], ["braintree"]))
+-|| (matchesAny(finding["secret"], [r"""^test_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["adyen"]))
+-|| (matchesAny(finding["secret"], [r"""^live_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["adyen"]))
+-|| (matchesAny(finding["secret"], [r"""^[A-Za-z0-9]{32}$"""]) && containsAny(finding["line"], ["bugsnag"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["hcaptcha", "site_key", "sitekey"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["pendo"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["instrumentation"]))
+-|| (matchesAny(finding["secret"], [r"""^TEST-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["mercado"]))
+-|| (matchesAny(finding["secret"], [r"""^TEST-[0-9]{8,16}-[0-9]{6}-[0-9a-f]{32}-[0-9]{7,10}$"""]) && containsAny(finding["line"], ["mercado"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{32}$"""]) && containsAny(finding["line"], ["mixpanel"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-z]{6}\/[a-z_-]{2,100}$"""]) && containsAny(finding["line"], ["logrocket"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-f]{8}$"""]) && containsAny(finding["line"], ["honeybadger"]))
+-|| (matchesAny(finding["secret"], [r"""^[a-zA-Z0-9=+]{21,24}$"""]) && containsAny(finding["line"], ["raygun"]))
+-|| (matchesAny(finding["secret"], [r"""^key_live_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["branch"]))
+-|| (matchesAny(finding["secret"], [r"""^key_test_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["branch"]))
+-|| (matchesAny(finding["secret"], [r"""^pub[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["datadog", "dd"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{6}$"""]) && containsAny(finding["line"], ["klaviyo"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["storefront"]))
+-|| (matchesAny(finding["secret"], [r"""^search-[0-9a-zA-Z_-]{24}$"""]) && containsAny(finding["line"], ["swiftype"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z_-]{20}$"""]) && containsAny(finding["line"], ["swiftype"]))
+-|| (matchesAny(finding["secret"], [r"""^pk.eyJ1Ijoi[0-9a-zA-Z_-]{1,}\.[0-9a-zA-Z-_]{1,}$"""]) && containsAny(finding["line"], ["map"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["crisp"]))
+-|| (matchesAny(finding["secret"], [r"""^client-[a-zA-Z0-9]{43}$"""]) && containsAny(finding["line"], ["statsdig"]))
+-|| (matchesAny(finding["secret"], [r"""^sdk-[a-zA-Z0-9]{15,16}$"""]) && containsAny(finding["line"], ["growthbook"]))
+-|| (matchesAny(finding["secret"], [r"""^[a-zA-Z0-9\/=]{24}$"""]) && containsAny(finding["line"], ["growthbook"]))
+-|| (matchesAny(finding["secret"], [r"""^[a-zA-Z0-9]{21,22}$"""]) && containsAny(finding["line"], ["optimizely"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{24}$"""]) && containsAny(finding["line"], ["launchdarkly"]))
+-|| (matchesAny(finding["secret"], [r"""^pk_test_[0-9a-zA-Z]{20,70}$"""]) && containsAny(finding["line"], ["clerk"]))
+-|| (matchesAny(finding["secret"], [r"""^pk_live_[0-9a-zA-Z]{20,70}$"""]) && containsAny(finding["line"], ["clerk"]))
+-|| (matchesAny(finding["secret"], [r"""^sk_test_[0-9a-zA-Z]{20,70}$"""]) && containsAny(finding["line"], ["clerk"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{40}$"""]) && containsAny(finding["line"], ["smartlook"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9A-Z]{5,6}$"""]) && containsAny(finding["line"], ["fullstory"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["zendesk", "zdassets.com"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{27}$"""]) && containsAny(finding["line"], ["rudderstack"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["web3forms"]))
+-|| (matchesAny(finding["secret"], [r"""^[0-9]{12}$"""]) && containsAny(finding["line"], ["2checkout", "twocheckout"]))
+-|| (matchesAny(finding["secret"], [r"""^test_[a-zA-Z0-9]{27}$"""]) && containsAny(finding["line"], ["paddle"]))
+-|| (matchesAny(finding["secret"], [r"""^live_[a-zA-Z0-9]{27}$"""]) && containsAny(finding["line"], ["paddle"]))
+-|| (matchesAny(finding["secret"], [r"""^pk_live_[0-9A-F]{16}$"""]) && containsAny(finding["line"], ["magic"]))
++|| (matchesAny(finding["secret"], [`^pk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$`]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
++|| (matchesAny(finding["secret"], [`^rk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$`]) && containsAny(finding["line"], ["stripe"]))
++|| (matchesAny(finding["secret"], [`^sk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$`]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
++|| (matchesAny(finding["secret"], [`^pk_live_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$`]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
++|| (matchesAny(finding["secret"], [`^pk_test_[A-Za-z0-9_-]{40}$`]) && containsAny(finding["line"], ["paystack"]))
++|| (matchesAny(finding["secret"], [`^sk_test_[A-Za-z0-9_-]{40}$`]) && containsAny(finding["line"], ["paystack"]))
++|| (matchesAny(finding["secret"], [`^pk_live_[A-Za-z0-9_-]{40}$`]) && containsAny(finding["line"], ["paystack"]))
++|| (matchesAny(finding["secret"], [`^sandbox_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}$`]) && containsAny(finding["line"], ["braintree"]))
++|| (matchesAny(finding["secret"], [`^production_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}$`]) && containsAny(finding["line"], ["braintree"]))
++|| (matchesAny(finding["secret"], [`^test_[0-9a-zA-Z]{32}$`]) && containsAny(finding["line"], ["adyen"]))
++|| (matchesAny(finding["secret"], [`^live_[0-9a-zA-Z]{32}$`]) && containsAny(finding["line"], ["adyen"]))
++|| (matchesAny(finding["secret"], [`^[A-Za-z0-9]{32}$`]) && containsAny(finding["line"], ["bugsnag"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["hcaptcha", "site_key", "sitekey"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["pendo"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["instrumentation"]))
++|| (matchesAny(finding["secret"], [`^TEST-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["mercado"]))
++|| (matchesAny(finding["secret"], [`^TEST-[0-9]{8,16}-[0-9]{6}-[0-9a-f]{32}-[0-9]{7,10}$`]) && containsAny(finding["line"], ["mercado"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{32}$`]) && containsAny(finding["line"], ["mixpanel"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-z]{6}\/[a-z_-]{2,100}$`]) && containsAny(finding["line"], ["logrocket"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-f]{8}$`]) && containsAny(finding["line"], ["honeybadger"]))
++|| (matchesAny(finding["secret"], [`^[a-zA-Z0-9=+]{21,24}$`]) && containsAny(finding["line"], ["raygun"]))
++|| (matchesAny(finding["secret"], [`^key_live_[0-9a-zA-Z]{32}$`]) && containsAny(finding["line"], ["branch"]))
++|| (matchesAny(finding["secret"], [`^key_test_[0-9a-zA-Z]{32}$`]) && containsAny(finding["line"], ["branch"]))
++|| (matchesAny(finding["secret"], [`^pub[0-9a-zA-Z]{32}$`]) && containsAny(finding["line"], ["datadog", "dd"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-zA-Z]{6}$`]) && containsAny(finding["line"], ["klaviyo"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-zA-Z]{32}$`]) && containsAny(finding["line"], ["storefront"]))
++|| (matchesAny(finding["secret"], [`^search-[0-9a-zA-Z_-]{24}$`]) && containsAny(finding["line"], ["swiftype"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-zA-Z_-]{20}$`]) && containsAny(finding["line"], ["swiftype"]))
++|| (matchesAny(finding["secret"], [`^pk.eyJ1Ijoi[0-9a-zA-Z_-]{1,}\.[0-9a-zA-Z-_]{1,}$`]) && containsAny(finding["line"], ["map"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["crisp"]))
++|| (matchesAny(finding["secret"], [`^client-[a-zA-Z0-9]{43}$`]) && containsAny(finding["line"], ["statsdig"]))
++|| (matchesAny(finding["secret"], [`^sdk-[a-zA-Z0-9]{15,16}$`]) && containsAny(finding["line"], ["growthbook"]))
++|| (matchesAny(finding["secret"], [`^[a-zA-Z0-9\/=]{24}$`]) && containsAny(finding["line"], ["growthbook"]))
++|| (matchesAny(finding["secret"], [`^[a-zA-Z0-9]{21,22}$`]) && containsAny(finding["line"], ["optimizely"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{24}$`]) && containsAny(finding["line"], ["launchdarkly"]))
++|| (matchesAny(finding["secret"], [`^pk_test_[0-9a-zA-Z]{20,70}$`]) && containsAny(finding["line"], ["clerk"]))
++|| (matchesAny(finding["secret"], [`^pk_live_[0-9a-zA-Z]{20,70}$`]) && containsAny(finding["line"], ["clerk"]))
++|| (matchesAny(finding["secret"], [`^sk_test_[0-9a-zA-Z]{20,70}$`]) && containsAny(finding["line"], ["clerk"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-zA-Z]{40}$`]) && containsAny(finding["line"], ["smartlook"]))
++|| (matchesAny(finding["secret"], [`^[0-9A-Z]{5,6}$`]) && containsAny(finding["line"], ["fullstory"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["zendesk", "zdassets.com"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-zA-Z]{27}$`]) && containsAny(finding["line"], ["rudderstack"]))
++|| (matchesAny(finding["secret"], [`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`]) && containsAny(finding["line"], ["web3forms"]))
++|| (matchesAny(finding["secret"], [`^[0-9]{12}$`]) && containsAny(finding["line"], ["2checkout", "twocheckout"]))
++|| (matchesAny(finding["secret"], [`^test_[a-zA-Z0-9]{27}$`]) && containsAny(finding["line"], ["paddle"]))
++|| (matchesAny(finding["secret"], [`^live_[a-zA-Z0-9]{27}$`]) && containsAny(finding["line"], ["paddle"]))
++|| (matchesAny(finding["secret"], [`^pk_live_[0-9A-F]{16}$`]) && containsAny(finding["line"], ["magic"]))
+
+commit 66d51b6bad0a59c83751fb673e09ec27d7bebbba
+Author: jl-aikido <joseph.leon@aikido.dev>
+Date:   Wed Jul 1 16:51:58 2026 -0400
+
+    Filter Publishable and Test Keys from Generic Results (#207)
+    
+    * adding support for filtering public-by-design and known test keys from generic secret results
+    
+    * consolidate simple matchesAny when the subject is the secret
+    
+    * adding inline comments for each secret type
+    
+    ---------
+    
+    Co-authored-by: Zach <15034943+zricethezav@users.noreply.github.com>
+
+diff --git a/cmd/generate/config/rules/generic_api_key_filter.go b/cmd/generate/config/rules/generic_api_key_filter.go
+index 2db2a95..7c05b71 100644
+--- a/cmd/generate/config/rules/generic_api_key_filter.go
++++ b/cmd/generate/config/rules/generic_api_key_filter.go
+@@ -28 +28 @@ func buildGenericAPIKeyFilter() string {
+-]))`
++]))` + buildTestAndPublicAPIFilters()
+@@ -31,4 +31,98 @@ func buildGenericAPIKeyFilter() string {
+-func exprStringList(ss []string) string {
+-	parts := make([]string, len(ss))
+-	for i, s := range ss {
+-		parts[i] = strconv.Quote(s)
++// testAndPublicAPIFilter filters out a finding whose secret matches regex. When
++// keywords is non-empty, the secret is only filtered if one of the keywords
++// also appears nearby on the finding's line.
++type testAndPublicAPIFilter struct {
++	regex    string
++	keywords []string
++}
++
++const uuidHex = `[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`
++
++// testAndPublicAPIFilters is a denylist of test and public API key patterns.
++var testAndPublicAPIFilters = []testAndPublicAPIFilter{
++	// Regex Only
++	{regex: `sb_publishable_[A-Za-z0-9_-]{31}`}, // Supabase Publishable Key
++	{regex: `0x4AAAAAA[A-Za-z0-9_-]{15}`}, // Cloudflare Turnstile Site Key
++	{regex: `FCM[a-zA-Z0-9]{13}`}, // Friendly Captcha Site Key
++	{regex: `ysc1_[A-Za-z0-9_-]{48}`}, // Yandex SmartCaptcha Site Key
++	{regex: `phc_[A-Za-z0-9_-]{43,44}`}, // Posthog Project API Key
++	{regex: `APP_USR-` + uuidHex}, // Mercado Pago Production Public Key
++	{regex: `access-(sandbox|development)-` + uuidHex}, // Plaid Sandbox/Development Access Token
++	{regex: `asset-report-(sandbox|development)-` + uuidHex}, // Plaid Sandbox/Development Asset Report Token
++	{regex: `public-(sandbox|development|production)-` + uuidHex}, // Plaid Sandbox/Development/Production Public Token
++	{regex: `link-(sandbox|development)-` + uuidHex}, // Plaid Sandbox/Development Link Token
++	{regex: `hbp_[0-9a-zA-Z]{36}`}, // Honeybadger API Key
++	{regex: `woos-` + uuidHex}, // Woosmap Public Key
++	{regex: `(https://)?[0-9a-zA-Z]{32}\@sentry\.io`}, // Sentry Public DSN
++	{regex: `sub-c-` + uuidHex}, // PubNub Subscribe Key
++	{regex: `pub-c-` + uuidHex}, // PubNub Publish Key
++	{regex: `hc[a-z]ik_([a-z0-9]{26,58})`}, // Honeycomb Ingest Key
++	{regex: `mob-` + uuidHex}, // LaunchDarkly Mobile Key
++	{regex: `public-token-test-` + uuidHex}, // Stytch Public Test Token
++	{regex: `public-token-live-` + uuidHex}, // Stytch Public Live Token
++	{regex: `pdl_sdbx_apikey_[a-z\d]{26}_[a-zA-Z\d]{22}_[a-zA-Z\d]{3}`}, // Paddle Sandbox API Key
++	// Regex + Keyword
++	{`pk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?`, []string{"stripe", "woo", "wcm"}}, // Stripe and WooCommerce Sandbox Publishable Key
++	{`rk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?`, []string{"stripe"}}, // Stripe Sandbox Restricted Key
++	// {`sk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?`, []string{"stripe", "woo", "wcm"}}, // Stripe and WooCommerce Sandbox Secret Key (not including b/c PII could be in test)
++	{`pk_live_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?`, []string{"stripe", "woo", "wcm"}}, // Stripe and WooCommerce Publishable Live Key
++	{`pk_test_[A-Za-z0-9_-]{40}`, []string{"paystack"}}, // Paystack Test Public Key
++	// {`sk_test_[A-Za-z0-9_-]{40}`, []string{"paystack"}}, // Paystack Test Secret Key (not including b/c PII could be in test)
++	{`pk_live_[A-Za-z0-9_-]{40}`, []string{"paystack"}}, // Paystack Live Public Key
++	{`sandbox_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}`, []string{"braintree"}}, // Braintree Sandbox Tokenization Key
++	{`production_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}`, []string{"braintree"}}, // Braintree Production Tokenization Key
++	{`test_[0-9a-zA-Z]{32}`, []string{"adyen"}}, // Adyen Test Client Key
++	{`live_[0-9a-zA-Z]{32}`, []string{"adyen"}}, // Adyen Live Client Key
++	{`[A-Za-z0-9]{32}`, []string{"bugsnag"}}, // Bugsnag SDK API Key
++	{uuidHex, []string{"hcaptcha", "site_key", "sitekey"}}, // hCaptcha Site Key
++	{uuidHex, []string{"pendo"}}, // Pendo API Key
++	{uuidHex, []string{"instrumentation"}}, // Azure Application Insights Instrumentation Key
++	{`TEST-` + uuidHex, []string{"mercado"}}, // Mercado Pago Test Public Key
++	// {`TEST-[0-9]{8,16}-[0-9]{6}-[0-9a-f]{32}-[0-9]{7,10}`, []string{"mercado"}}, // Mercado Pago Test Access Token (not including b/c PII could be in test)
++	{`[0-9a-fA-F]{32}`, []string{"mixpanel"}}, // Mixpanel Project Token
++	{`[0-9a-z]{6}\/[a-z_-]{2,100}`, []string{"logrocket"}}, // LogRocket Project ID
++	{`[0-9a-f]{8}`, []string{"honeybadger"}}, // Honeybadger Check In Token
++	{`[a-zA-Z0-9=+]{21,24}`, []string{"raygun"}}, // Raygun App API Key
++	{`key_live_[0-9a-zA-Z]{32}`, []string{"branch"}}, // Branch.io Production Branch Key
++	{`key_test_[0-9a-zA-Z]{32}`, []string{"branch"}}, // Branch.io Test Branch Key
++	{`pub[0-9a-zA-Z]{32}`, []string{"datadog", "dd"}}, // Datadog Client Token
++	{`[0-9a-zA-Z]{6}`, []string{"klaviyo"}}, // Klaviyo Company ID
++	{`[0-9a-zA-Z]{32}`, []string{"storefront"}}, // Shopify Storefront Public Access Token
++	{`search-[0-9a-zA-Z_-]{24}`, []string{"swiftype"}}, // Elastic Swiftype Public Search Key
++	{`[0-9a-zA-Z_-]{20}`, []string{"swiftype"}}, // Elastic Swiftype Public Engine Key
++	{`pk.eyJ1Ijoi[0-9a-zA-Z_-]{1,}\.[0-9a-zA-Z-_]{1,}`, []string{"map"}}, // Mapbox Public Key
++	{uuidHex, []string{"crisp"}}, // Crisp Website ID
++	{`client-[a-zA-Z0-9]{43}`, []string{"statsdig"}}, // Statsdig Client Key
++	{`sdk-[a-zA-Z0-9]{15,16}`, []string{"growthbook"}}, // Growthbook Client Key
++	{`[a-zA-Z0-9\/=]{24}`, []string{"growthbook"}}, // Growthbook Decryption Key
++	{`[a-zA-Z0-9]{21,22}`, []string{"optimizely"}}, // Optimizely SDK Key
++	{`[0-9a-fA-F]{24}`, []string{"launchdarkly"}}, //  LaunchDarkly Client Side ID
++	{`pk_test_[0-9a-zA-Z]{20,70}`, []string{"clerk"}}, // Clerk Test Publishable Key
++	{`pk_live_[0-9a-zA-Z]{20,70}`, []string{"clerk"}}, // Clerk Live Publishable Key
++	// {`sk_test_[0-9a-zA-Z]{20,70}`, []string{"clerk"}}, // Clerk Test Secret Key (not including b/c PII could be in test)
++	{`[0-9a-zA-Z]{40}`, []string{"smartlook"}}, // Smartlook Project Key
++	{`[0-9A-Z]{5,6}`, []string{"fullstory"}}, // FullStory Org ID
++	{uuidHex, []string{"zendesk", "zdassets.com"}}, // Zendesk Web Widget API Key
++	{`[0-9a-zA-Z]{27}`, []string{"rudderstack"}}, // Rudderstack Write Key
++	{uuidHex, []string{"web3forms"}}, // Web3Forms Access Key
++	{`[0-9]{12}`, []string{"2checkout", "twocheckout"}}, // 2Checkout Merchant Code
++	{`test_[a-zA-Z0-9]{27}`, []string{"paddle"}}, // Paddle Client-Side Test Token
++	{`live_[a-zA-Z0-9]{27}`, []string{"paddle"}}, // Paddle Client-Side Live Token
++	{`pk_live_[0-9A-F]{16}`, []string{"magic"}}, // Magic Publishable Key
++}
++
++// buildTestAndPublicAPIFilters renders one OR clause per testAndPublicAPIFilter.
++// Entries without keywords match on the (anchored) secret regex alone; entries
++// with keywords additionally require a keyword nearby on the line. containsAny
++// lowercases its input, so the lowercase keywords match case-insensitively.
++func buildTestAndPublicAPIFilters() string {
++	var b strings.Builder
++	var secretOnly []string
++	for _, f := range testAndPublicAPIFilters {
++		secretMatch := `matchesAny(finding["secret"], [r"""^` + f.regex + `$"""])`
++		if len(f.keywords) == 0 {
++			secretOnly = append(secretOnly, `r"""^`+f.regex+`$"""`)
++			continue
++		}
++		b.WriteString("\n|| ")
++		b.WriteString("(" + secretMatch + ` && containsAny(finding["line"], ` + exprStringListInline(f.keywords) + "))")
+@@ -35,0 +130,7 @@ func exprStringList(ss []string) string {
++	if len(secretOnly) > 0 {
++		return "\n|| matchesAny(finding[\"secret\"], " + exprList(secretOnly) + ")" + b.String()
++	}
++	return b.String()
++}
++
++func exprList(parts []string) string {
+@@ -50,0 +152,16 @@ func exprStringList(ss []string) string {
++
++func exprStringListInline(ss []string) string {
++	parts := make([]string, len(ss))
++	for i, s := range ss {
++		parts[i] = strconv.Quote(s)
++	}
++	return "[" + strings.Join(parts, ", ") + "]"
++}
++
++func exprStringList(ss []string) string {
++	parts := make([]string, len(ss))
++	for i, s := range ss {
++		parts[i] = strconv.Quote(s)
++	}
++	return exprList(parts)
++}
+diff --git a/config/betterleaks.toml b/config/betterleaks.toml
+index 08ece33..ad087ff 100644
+--- a/config/betterleaks.toml
++++ b/config/betterleaks.toml
+@@ -3708,0 +3709,69 @@ entropy(finding["secret"]) <= 3.5
++|| matchesAny(finding["secret"], [
++  r"""^sb_publishable_[A-Za-z0-9_-]{31}$""",
++  r"""^0x4AAAAAA[A-Za-z0-9_-]{15}$""",
++  r"""^FCM[a-zA-Z0-9]{13}$""",
++  r"""^ysc1_[A-Za-z0-9_-]{48}$""",
++  r"""^phc_[A-Za-z0-9_-]{43,44}$""",
++  r"""^APP_USR-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^access-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^asset-report-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^public-(sandbox|development|production)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^link-(sandbox|development)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^hbp_[0-9a-zA-Z]{36}$""",
++  r"""^woos-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^(https://)?[0-9a-zA-Z]{32}\@sentry\.io$""",
++  r"""^sub-c-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^pub-c-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^hc[a-z]ik_([a-z0-9]{26,58})$""",
++  r"""^mob-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^public-token-test-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^public-token-live-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
++  r"""^pdl_sdbx_apikey_[a-z\d]{26}_[a-zA-Z\d]{22}_[a-zA-Z\d]{3}$"""
++])
++|| (matchesAny(finding["secret"], [r"""^pk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
++|| (matchesAny(finding["secret"], [r"""^rk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe"]))
++|| (matchesAny(finding["secret"], [r"""^sk_test_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
++|| (matchesAny(finding["secret"], [r"""^pk_live_[A-Za-z0-9]{24}(?:[A-Za-z0-9]{10})?(?:[A-Za-z0-9]{65})?$"""]) && containsAny(finding["line"], ["stripe", "woo", "wcm"]))
++|| (matchesAny(finding["secret"], [r"""^pk_test_[A-Za-z0-9_-]{40}$"""]) && containsAny(finding["line"], ["paystack"]))
++|| (matchesAny(finding["secret"], [r"""^sk_test_[A-Za-z0-9_-]{40}$"""]) && containsAny(finding["line"], ["paystack"]))
++|| (matchesAny(finding["secret"], [r"""^pk_live_[A-Za-z0-9_-]{40}$"""]) && containsAny(finding["line"], ["paystack"]))
++|| (matchesAny(finding["secret"], [r"""^sandbox_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}$"""]) && containsAny(finding["line"], ["braintree"]))
++|| (matchesAny(finding["secret"], [r"""^production_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16}$"""]) && containsAny(finding["line"], ["braintree"]))
++|| (matchesAny(finding["secret"], [r"""^test_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["adyen"]))
++|| (matchesAny(finding["secret"], [r"""^live_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["adyen"]))
++|| (matchesAny(finding["secret"], [r"""^[A-Za-z0-9]{32}$"""]) && containsAny(finding["line"], ["bugsnag"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["hcaptcha", "site_key", "sitekey"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["pendo"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["instrumentation"]))
++|| (matchesAny(finding["secret"], [r"""^TEST-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["mercado"]))
++|| (matchesAny(finding["secret"], [r"""^TEST-[0-9]{8,16}-[0-9]{6}-[0-9a-f]{32}-[0-9]{7,10}$"""]) && containsAny(finding["line"], ["mercado"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{32}$"""]) && containsAny(finding["line"], ["mixpanel"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-z]{6}\/[a-z_-]{2,100}$"""]) && containsAny(finding["line"], ["logrocket"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-f]{8}$"""]) && containsAny(finding["line"], ["honeybadger"]))
++|| (matchesAny(finding["secret"], [r"""^[a-zA-Z0-9=+]{21,24}$"""]) && containsAny(finding["line"], ["raygun"]))
++|| (matchesAny(finding["secret"], [r"""^key_live_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["branch"]))
++|| (matchesAny(finding["secret"], [r"""^key_test_[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["branch"]))
++|| (matchesAny(finding["secret"], [r"""^pub[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["datadog", "dd"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{6}$"""]) && containsAny(finding["line"], ["klaviyo"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{32}$"""]) && containsAny(finding["line"], ["storefront"]))
++|| (matchesAny(finding["secret"], [r"""^search-[0-9a-zA-Z_-]{24}$"""]) && containsAny(finding["line"], ["swiftype"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z_-]{20}$"""]) && containsAny(finding["line"], ["swiftype"]))
++|| (matchesAny(finding["secret"], [r"""^pk.eyJ1Ijoi[0-9a-zA-Z_-]{1,}\.[0-9a-zA-Z-_]{1,}$"""]) && containsAny(finding["line"], ["map"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["crisp"]))
++|| (matchesAny(finding["secret"], [r"""^client-[a-zA-Z0-9]{43}$"""]) && containsAny(finding["line"], ["statsdig"]))
++|| (matchesAny(finding["secret"], [r"""^sdk-[a-zA-Z0-9]{15,16}$"""]) && containsAny(finding["line"], ["growthbook"]))
++|| (matchesAny(finding["secret"], [r"""^[a-zA-Z0-9\/=]{24}$"""]) && containsAny(finding["line"], ["growthbook"]))
++|| (matchesAny(finding["secret"], [r"""^[a-zA-Z0-9]{21,22}$"""]) && containsAny(finding["line"], ["optimizely"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{24}$"""]) && containsAny(finding["line"], ["launchdarkly"]))
++|| (matchesAny(finding["secret"], [r"""^pk_test_[0-9a-zA-Z]{20,70}$"""]) && containsAny(finding["line"], ["clerk"]))
++|| (matchesAny(finding["secret"], [r"""^pk_live_[0-9a-zA-Z]{20,70}$"""]) && containsAny(finding["line"], ["clerk"]))
++|| (matchesAny(finding["secret"], [r"""^sk_test_[0-9a-zA-Z]{20,70}$"""]) && containsAny(finding["line"], ["clerk"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{40}$"""]) && containsAny(finding["line"], ["smartlook"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9A-Z]{5,6}$"""]) && containsAny(finding["line"], ["fullstory"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["zendesk", "zdassets.com"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-zA-Z]{27}$"""]) && containsAny(finding["line"], ["rudderstack"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"""]) && containsAny(finding["line"], ["web3forms"]))
++|| (matchesAny(finding["secret"], [r"""^[0-9]{12}$"""]) && containsAny(finding["line"], ["2checkout", "twocheckout"]))
++|| (matchesAny(finding["secret"], [r"""^test_[a-zA-Z0-9]{27}$"""]) && containsAny(finding["line"], ["paddle"]))
++|| (matchesAny(finding["secret"], [r"""^live_[a-zA-Z0-9]{27}$"""]) && containsAny(finding["line"], ["paddle"]))
++|| (matchesAny(finding["secret"], [r"""^pk_live_[0-9A-F]{16}$"""]) && containsAny(finding["line"], ["magic"]))
+@@ -6714,0 +6784 @@ keywords = ["zendesk"]
++
+
+commit 28f08b4c8c4420a601f67ee9887c201697ff4568
+Author: Zachary Rice <15034943+zricethezav@users.noreply.github.com>
+Date:   Mon Jun 29 15:03:45 2026 -0500
+
+    `config` command (#218)
+    
+    * add config command
+    
+    * use fake data, hide help
+
+diff --git a/cmd/config.go b/cmd/config.go
+new file mode 100644
+index 0000000..97b294e
+--- /dev/null
++++ b/cmd/config.go
+@@ -0,0 +1,495 @@
++package cmd
++
++import (
++	"fmt"
++	"os"
++	"sort"
++	"strings"
++
++	ahocorasick "github.com/rrethy/ahocorasick"
++	"github.com/spf13/cobra"
++
++	configpkg "github.com/betterleaks/betterleaks/config"
++	"github.com/betterleaks/betterleaks/internal/exprruntime"
++	"github.com/betterleaks/betterleaks/regexp"
++)
++
++type resolvedConfig struct {
++	cfg    *configpkg.Config
++	source string
++}
++
++func init() {
++	rootCmd.AddCommand(configCmd)
++	configCmd.AddCommand(configCheckCmd, configShowCmd, configPathCmd)
++}
++
++var configCmd = &cobra.Command{
++	Use:   "config",
++	Short: "validate and inspect betterleaks configs",
++}
++
++var configCheckCmd = &cobra.Command{
++	Use:          "check [config-path]",
++	Short:        "validate a betterleaks config",
++	Args:         cobra.MaximumNArgs(1),
++	SilenceUsage: true,
++	RunE: func(cmd *cobra.Command, args []string) error {
++		resolved, err := resolveConfig(cmd, args)
++		if err != nil {
++			return err
++		}
++		if err := validateConfig(resolved.cfg); err != nil {
++			return err
++		}
++		withValidation, withoutValidation := countValidationRules(resolved.cfg)
++		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "OK: %d rules (%d with validation, %d without validation)\n",
++			len(resolved.cfg.Rules), withValidation, withoutValidation)
++		return nil
++	},
++}
++
++var configShowCmd = &cobra.Command{
++	Use:          "show [config-path]",
++	Short:        "print the resolved betterleaks config",
++	Args:         cobra.MaximumNArgs(1),
++	SilenceUsage: true,
++	RunE: func(cmd *cobra.Command, args []string) error {
++		resolved, err := resolveConfig(cmd, args)
++		if err != nil {
++			return err
++		}
++		if err := validateConfig(resolved.cfg); err != nil {
++			return err
++		}
++		_, _ = cmd.OutOrStdout().Write([]byte(renderConfigTOML(renderConfig(resolved.cfg))))
++		return nil
++	},
++}
++
++var configPathCmd = &cobra.Command{
++	Use:          "path",
++	Short:        "print the selected config source",
++	Args:         cobra.NoArgs,
++	SilenceUsage: true,
++	RunE: func(cmd *cobra.Command, args []string) error {
++		resolved, err := resolveConfig(cmd, args)
++		if err != nil {
++			return err
++		}
++		_, _ = fmt.Fprintln(cmd.OutOrStdout(), resolved.source)
++		return nil
++	},
++}
++
++func resolveConfig(cmd *cobra.Command, args []string) (*resolvedConfig, error) {
++	if len(args) > 0 {
++		return loadConfigFile(args[0])
++	}
++
++	if cfgPath := getConfigFlag(cmd); cfgPath != "" {
++		return loadConfigFile(cfgPath)
++	}
++	if envPath, name := getEnvWithName("BETTERLEAKS_CONFIG", "GITLEAKS_CONFIG"); envPath != "" {
++		resolved, err := loadConfigFile(envPath)
++		if err != nil {
++			return nil, err
++		}
++		resolved.source = "env:" + name + ":" + envPath
++		return resolved, nil
++	}
++	if content, name := getEnvWithName("BETTERLEAKS_CONFIG_TOML", "GITLEAKS_CONFIG_TOML"); content != "" {
++		cfg, err := configpkg.ParseTOMLString(content, "")
++		if err != nil {
++			return nil, err
++		}
++		return &resolvedConfig{cfg: cfg, source: "env:" + name}, nil
++	}
++	if path := findConfigFile("."); path != "" {
++		return loadConfigFile(path)
++	}
++	cfg, err := configpkg.Default()
++	if err != nil {
++		return nil, err
++	}
++	return &resolvedConfig{cfg: cfg, source: "default"}, nil
++}
++
++func loadConfigFile(path string) (*resolvedConfig, error) {
++	cfg, err := configpkg.LoadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	return &resolvedConfig{cfg: cfg, source: path}, nil
++}
++
++func getConfigFlag(cmd *cobra.Command) string {
++	if cfgPath, err := cmd.Flags().GetString("config"); err == nil {
++		return cfgPath
++	}
++	if cfgPath, err := cmd.InheritedFlags().GetString("config"); err == nil {
++		return cfgPath
++	}
++	if cmd.Root() != nil {
++		if cfgPath, err := cmd.Root().PersistentFlags().GetString("config"); err == nil {
++			return cfgPath
++		}
++	}
++	return ""
++}
++
++func getEnvWithName(primary, fallback string) (string, string) {
++	if val := os.Getenv(primary); val != "" {
++		return val, primary
++	}
++	if val := os.Getenv(fallback); val != "" {
++		return val, fallback
++	}
++	return "", ""
++}
++
++func validateConfig(cfg *configpkg.Config) error {
++	compileKeywordTrie(cfg)
++	if err := compileRuleRegexps(cfg); err != nil {
++		return err
++	}
++	if err := cfg.CompileFilters(nil); err != nil {
++		return err
++	}
++	rt, err := exprruntime.New(nil)
++	if err != nil {
++		return err
++	}
++	if prg := cfg.PrefilterProgram(); prg != nil {
++		if _, err := rt.EvalPrefilter(prg, fakeAttributes()); err != nil {
++			return fmt.Errorf("evaluating global prefilter: %w", err)
++		}
++	}
++	if cfg.Filter != "" {
++		prg, err := rt.CompileFilter(cfg.Filter, nil)
++		if err != nil {
++			return fmt.Errorf("compiling global filter: %w", err)
++		}
++		if _, err := rt.EvalFilter(prg, fakeFinding(), fakeAttributes()); err != nil {
++			return fmt.Errorf("evaluating global filter: %w", err)
++		}
++	}
++	validationRT, err := cfg.CompileValidation()
++	if err != nil {
++		return err
++	}
++	for _, id := range sortedRuleIDs(cfg) {
++		rule := cfg.Rules[id]
++		if rule.Filter != "" {
++			prg, err := rt.CompileFilter(rule.Filter, nil)
++			if err != nil {
++				return fmt.Errorf("compiling rule %s filter: %w", id, err)
++			}
++			if _, err := rt.EvalFilter(prg, fakeFinding(), fakeAttributes()); err != nil {
++				return fmt.Errorf("evaluating rule %s filter: %w", id, err)
++			}
++		}
++		if validationRT != nil && rule.ValidateExpr != "" {
++			if _, err := validationRT.CompileValidation(rule.ValidateExpr); err != nil {
++				return fmt.Errorf("compiling rule %s validation: %w", id, err)
++			}
++		}
++	}
++	return nil
++}
++
++func fakeFinding() map[string]string {
++	return map[string]string{
++		"secret":      "betterleaks-check-secret",
++		"match":       "betterleaks-check-match",
++		"line":        "betterleaks-check-line",
++		"ruleID":      "betterleaks-check-rule",
++		"description": "betterleaks check rule",
++	}
++}
++
++func fakeAttributes() map[string]string {
++	return map[string]string{
++		"path":       "betterleaks/check.txt",
++		"file":       "betterleaks/check.txt",
++		"commit":     "0000000000000000000000000000000000000000",
++		"git.sha":    "0000000000000000000000000000000000000000",
++		"author":     "betterleaks",
++		"email":      "betterleaks@example.com",
++		"repository": "betterleaks",
++	}
++}
++
++func countValidationRules(cfg *configpkg.Config) (int, int) {
++	withValidation := 0
++	for _, rule := range cfg.Rules {
++		if rule.ValidateExpr != "" {
++			withValidation++
++		}
++	}
++	return withValidation, len(cfg.Rules) - withValidation
++}
++
++func compileKeywordTrie(cfg *configpkg.Config) {
++	keywords := make([]string, 0, len(cfg.Keywords))
++	for keyword := range cfg.Keywords {
++		keywords = append(keywords, keyword)
++	}
++	_ = ahocorasick.CompileStrings(keywords)
++}
++
++func compileRuleRegexps(cfg *configpkg.Config) error {
++	for _, id := range sortedRuleIDs(cfg) {
++		rule := cfg.Rules[id]
++		if rule.Regex != nil {
++			if err := rule.Regex.Compile(); err != nil {
++				return fmt.Errorf("compiling rule %s regex: %w", id, err)
++			}
++		}
++		if rule.Path != nil {
++			if err := rule.Path.Compile(); err != nil {
++				return fmt.Errorf("compiling rule %s path regex: %w", id, err)
++			}
++		}
++	}
++	return nil
++}
++
++func sortedRuleIDs(cfg *configpkg.Config) []string {
++	ids := make([]string, 0, len(cfg.Rules))
++	seen := make(map[string]struct{}, len(cfg.Rules))
++	for _, id := range cfg.OrderedRules {
++		if _, ok := cfg.Rules[id]; ok {
++			ids = append(ids, id)
++			seen[id] = struct{}{}
++		}
++	}
++	var rest []string
++	for id := range cfg.Rules {
++		if _, ok := seen[id]; !ok {
++			rest = append(rest, id)
++		}
++	}
++	sort.Strings(rest)
++	return append(ids, rest...)
++}
++
++type configView struct {
++	Title                 string     `toml:"title,omitempty"`
++	Description           string     `toml:"description,omitempty"`
++	MinVersion            string     `toml:"minVersion,omitempty"`
++	BetterleaksMinVersion string     `toml:"betterleaksMinVersion,omitempty"`
++	Prefilter             string     `toml:"prefilter,omitempty"`
++	Filter                string     `toml:"filter,omitempty"`
++	Rules                 []ruleView `toml:"rules"`
++}
++
++type ruleView struct {
++	ID          string         `toml:"id"`
++	Description string         `toml:"description,omitempty"`
++	Path        string         `toml:"path,omitempty"`
++	Regex       string         `toml:"regex,omitempty"`
++	SecretGroup int            `toml:"secretGroup,omitempty"`
++	Keywords    []string       `toml:"keywords,omitempty"`
++	Tags        []string       `toml:"tags,omitempty"`
++	Specificity int            `toml:"specificity,omitempty"`
++	Required    []requiredView `toml:"required,omitempty"`
++	Validate    string         `toml:"validate,omitempty"`
++	SkipReport  bool           `toml:"skipReport,omitempty"`
++	Filter      string         `toml:"filter,omitempty"`
++}
++
++type requiredView struct {
++	ID            string `toml:"id"`
++	WithinLines   *int   `toml:"withinLines,omitempty"`
++	WithinColumns *int   `toml:"withinColumns,omitempty"`
++}
++
++func renderConfig(cfg *configpkg.Config) configView {
++	view := configView{
++		Title:                 cfg.Title,
++		Description:           cfg.Description,
++		MinVersion:            cfg.MinVersion,
++		BetterleaksMinVersion: cfg.BetterleaksMinVersion,
++		Prefilter:             cfg.Prefilter,
++		Filter:                cfg.Filter,
++	}
++	for _, id := range sortedRuleIDs(cfg) {
++		rule := cfg.Rules[id]
++		rv := ruleView{
++			ID:          rule.RuleID,
++			Description: rule.Description,
++			Path:        regexString(rule.Path),
++			Regex:       regexString(rule.Regex),
++			SecretGroup: rule.SecretGroup,
++			Keywords:    rule.Keywords,
++			Tags:        rule.Tags,
++			Specificity: renderedSpecificity(rule.Specificity),
++			Validate:    rule.ValidateExpr,
++			SkipReport:  rule.SkipReport,
++			Filter:      rule.Filter,
++		}
++		for _, required := range rule.RequiredRules {
++			rv.Required = append(rv.Required, requiredView{
++				ID:            required.RuleID,
++				WithinLines:   required.WithinLines,
++				WithinColumns: required.WithinColumns,
++			})
++		}
++		view.Rules = append(view.Rules, rv)
++	}
++	return view
++}
++
++func renderConfigTOML(view configView) string {
++	var b strings.Builder
++
++	writeString(&b, "title", view.Title)
++	writeString(&b, "description", view.Description)
++	writeString(&b, "minVersion", view.MinVersion)
++	writeString(&b, "betterleaksMinVersion", view.BetterleaksMinVersion)
++	writeString(&b, "prefilter", view.Prefilter)
++	writeString(&b, "filter", view.Filter)
++
++	for _, rule := range view.Rules {
++		if b.Len() > 0 {
++			b.WriteByte('\n')
++		}
++		b.WriteString("[[rules]]\n")
++		writeString(&b, "id", rule.ID)
++		writeString(&b, "description", rule.Description)
++		writeString(&b, "path", rule.Path)
++		writeString(&b, "regex", rule.Regex)
++		writeInt(&b, "secretGroup", rule.SecretGroup)
++		writeStrings(&b, "keywords", rule.Keywords)
++		writeStrings(&b, "tags", rule.Tags)
++		writeInt(&b, "specificity", rule.Specificity)
++		writeString(&b, "validate", rule.Validate)
++		writeBool(&b, "skipReport", rule.SkipReport)
++		writeString(&b, "filter", rule.Filter)
++		for _, required := range rule.Required {
++			b.WriteString("\n[[rules.required]]\n")
++			writeString(&b, "id", required.ID)
++			writeIntPtr(&b, "withinLines", required.WithinLines)
++			writeIntPtr(&b, "withinColumns", required.WithinColumns)
++		}
++	}
++
++	return b.String()
++}
++
++func writeString(b *strings.Builder, key, value string) {
++	if value == "" {
++		return
++	}
++	b.WriteString(key)
++	b.WriteString(" = ")
++	b.WriteString(tomlString(value))
++	b.WriteByte('\n')
++}
++
++func writeStrings(b *strings.Builder, key string, values []string) {
++	if len(values) == 0 {
++		return
++	}
++	b.WriteString(key)
++	b.WriteString(" = [")
++	for i, value := range values {
++		if i > 0 {
++			b.WriteString(", ")
++		}
++		b.WriteString(tomlString(value))
++	}
++	b.WriteString("]\n")
++}
++
++func writeInt(b *strings.Builder, key string, value int) {
++	if value == 0 {
++		return
++	}
++	b.WriteString(key)
++	b.WriteString(" = ")
++	_, _ = fmt.Fprint(b, value)
++	b.WriteByte('\n')
++}
++
++func writeIntPtr(b *strings.Builder, key string, value *int) {
++	if value == nil {
++		return
++	}
++	b.WriteString(key)
++	b.WriteString(" = ")
++	_, _ = fmt.Fprint(b, *value)
++	b.WriteByte('\n')
++}
++
++func writeBool(b *strings.Builder, key string, value bool) {
++	if !value {
++		return
++	}
++	b.WriteString(key)
++	b.WriteString(" = true\n")
++}
++
++func tomlString(s string) string {
++	if strings.Contains(s, "\n") && !strings.Contains(s, "'''") {
++		return "'''\n" + s + "'''"
++	}
++	if strings.ContainsAny(s, `'\`) && !strings.Contains(s, "'''") && !hasControlChar(s) {
++		return "'''" + s + "'''"
++	}
++	if !strings.Contains(s, "'") && !hasControlChar(s) {
++		return "'" + s + "'"
++	}
++	var b strings.Builder
++	b.WriteByte('"')
++	for _, r := range s {
++		switch r {
++		case '\b':
++			b.WriteString(`\b`)
++		case '\t':
++			b.WriteString(`\t`)
++		case '\n':
++			b.WriteString(`\n`)
++		case '\f':
++			b.WriteString(`\f`)
++		case '\r':
++			b.WriteString(`\r`)
++		case '"':
++			b.WriteString(`\"`)
++		case '\\':
++			b.WriteString(`\\`)
++		default:
++			if r < 0x20 || r == 0x7f {
++				_, _ = fmt.Fprintf(&b, `\u%04x`, r)
++			} else {
++				b.WriteRune(r)
++			}
++		}
++	}
++	b.WriteByte('"')
++	return b.String()
++}
++
++func hasControlChar(s string) bool {
++	for _, r := range s {
++		if r < 0x20 || r == 0x7f {
++			return true
++		}
++	}
++	return false
++}
++
++func regexString(re *regexp.Regexp) string {
++	if re == nil {
++		return ""
++	}
++	return re.String()
++}
++
++func renderedSpecificity(specificity int) int {
++	if specificity == configpkg.DefaultRuleSpecificity {
++		return 0
++	}
++	return specificity
++}
+diff --git a/regexp/regexp.go b/regexp/regexp.go
+index d2d5b1a..b73c5c1 100644
+--- a/regexp/regexp.go
++++ b/regexp/regexp.go
+@@ -65,0 +66,4 @@ func (r *Regexp) String() string {
++func (r *Regexp) Compile() error {
++	r.compiled()
++	return r.err
++}
+diff --git a/regexp/regexp_test.go b/regexp/regexp_test.go
+index e432175..29a010a 100644
+--- a/regexp/regexp_test.go
++++ b/regexp/regexp_test.go
+@@ -93,0 +94,15 @@ func TestLazyCompileFailureDoesNotPanic(t *testing.T) {
++
++func TestCompileReturnsLazyCompileError(t *testing.T) {
++	previous := currentEngine
++	defer SetEngine(previous)
++
++	SetEngine(failingEngine{})
++
++	re, err := Compile(`foo`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := re.Compile(); err == nil {
++		t.Fatal("Compile returned nil after engine compile failure")
++	}
++}
+
+commit 228352ff340c6861f64482a8a5adbc5dd80c3ace
+Author: Richard Gomez <32133502+rgmz@users.noreply.github.com>
+Date:   Fri Jun 26 20:43:59 2026 -0400
+
+    build: upgrade crypto to v0.53.0 (#217)
+    
+    Co-authored-by: Dario Zachow <dario.zachow@deutschebahn.com>
+
+diff --git a/go.mod b/go.mod
+index 53ff5d7..10ea7a4 100644
+--- a/go.mod
++++ b/go.mod
+@@ -58 +58 @@ require (
+-	golang.org/x/crypto v0.46.0 // indirect
++	golang.org/x/crypto v0.53.0 // indirect
+@@ -71,3 +71,3 @@ require (
+-	golang.org/x/sync v0.20.0
+-	golang.org/x/sys v0.45.0 // indirect
+-	golang.org/x/text v0.37.0 // indirect
++	golang.org/x/sync v0.21.0
++	golang.org/x/sys v0.46.0 // indirect
++	golang.org/x/text v0.38.0 // indirect
+diff --git a/go.sum b/go.sum
+index 1b8a449..27ba38c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -145,0 +146,2 @@ golang.org/x/crypto v0.46.0/go.mod h1:Evb/oLKmMraqjZ2iQTwDwvCtJkczlDuTmdJXoZVzqU
++golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
++golang.org/x/crypto v0.53.0/go.mod h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=
+@@ -151,0 +154,2 @@ golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
++golang.org/x/sync v0.21.0 h1:HLII4xRRTtCRkxYp4HNFF0Js/Og6q2i++KXbg0gHCwM=
++golang.org/x/sync v0.21.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+@@ -156,0 +161,2 @@ golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
++golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
++golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+@@ -158,0 +165,2 @@ golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=
++golang.org/x/text v0.38.0 h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=
++golang.org/x/text v0.38.0/go.mod h1:YXZt3QhHUKYT53r2lLKFIVi6Ao1jdzrTR/KQ09qyxF4=
+
+commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Author: Fixture Bot <fixture@example.com>
+Date:   Mon Jan 5 10:00:00 2026 +0000
+
+    fixture: synthetic secrets for the digest guard
+
+diff --git a/config/creds.env b/config/creds.env
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/config/creds.env
+@@ -0,0 +1,6 @@
++AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
++github_pat = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
++slack_token = "REDACTED_SLACK_TOKEN"
++generic_api_key = "REDACTED_STRIPE_TOKEN"
++stripe_key = "REDACTED_STRIPE_TOKEN"
++private_key_pw = "hunter2hunter2"
+diff --git a/deploy/notes.md b/deploy/notes.md
+index 0000000..2222222 100644
+--- a/deploy/notes.md
++++ b/deploy/notes.md
+@@ -10,0 +11,2 @@
++The gitlab runner registration token is GR1348941abcdefghijklmnopqrst
++heroku_api_key: 12345678-abcd-4ef0-9012-3456789abcde

@@ -626,7 +626,7 @@ func (s *GitHub) scanRepoGit(ctx context.Context, repo *github.Repository, yield
 				LogOpts: s.LogOpts, Workers: s.Workers,
 			}
 		} else {
-			gitCmd, err := NewGitLogCmdContext(ctx, repoPath, s.LogOpts)
+			gitCmd, err := newGitLogScanCmdContext(ctx, repoPath, s.LogOpts)
 			if err != nil {
 				return err
 			}

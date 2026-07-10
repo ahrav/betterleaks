@@ -3,16 +3,22 @@ package sources
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/fatih/semgroup"
 	"github.com/gitleaks/go-gitdiff/gitdiff"
+
+	"github.com/betterleaks/betterleaks/sources/scm"
 )
 
 // consumedView is the projection of a *gitdiff.File that betterleaks
@@ -66,6 +72,32 @@ func viewOf(f *gitdiff.File) consumedView {
 	return v
 }
 
+func viewOfFast(f fastGitFile) consumedView {
+	v := consumedView{
+		NewName:  f.newName,
+		IsDelete: f.isDelete,
+		IsBinary: f.isBinary,
+	}
+	if f.header != nil {
+		v.SHA = f.header.sha
+		v.Message = f.header.message
+		if f.header.author.valid {
+			v.AuthorName = f.header.author.name
+			v.AuthorEmail = f.header.author.email
+		}
+		if !f.header.authorDate.IsZero() {
+			v.AuthorDate = f.header.authorDate.UTC().Format("2006-01-02T15:04:05Z07:00")
+		}
+	}
+	for _, fragment := range f.fragments {
+		v.Fragments = append(v.Fragments, fragView{
+			NewPosition: fragment.newPosition,
+			RawAdd:      fragment.raw,
+		})
+	}
+	return v
+}
+
 func collectViews(t *testing.T, ch <-chan *gitdiff.File) []consumedView {
 	t.Helper()
 	var out []consumedView
@@ -74,6 +106,21 @@ func collectViews(t *testing.T, ch <-chan *gitdiff.File) []consumedView {
 			continue // consumer skips deletes before reading anything else
 		}
 		out = append(out, viewOf(f))
+	}
+	return out
+}
+
+func collectFastViews(t *testing.T, patch []byte) []consumedView {
+	t.Helper()
+	var out []consumedView
+	err := parseFastGitLog(bytes.NewReader(patch), func(f fastGitFile) error {
+		if !f.isDelete {
+			out = append(out, viewOfFast(f))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("parseFastGitLog: %v", err)
 	}
 	return out
 }
@@ -94,13 +141,23 @@ func diffBothParsers(t *testing.T, patch []byte, label string) {
 		t.Fatalf("%s: fastParseGitLog: %v", label, err)
 	}
 	fast := collectViews(t, fastCh)
+	direct := collectFastViews(t, patch)
 
 	if len(ref) != len(fast) {
 		t.Fatalf("%s: file count mismatch: gitdiff=%d fast=%d", label, len(ref), len(fast))
 	}
+	if len(ref) != len(direct) {
+		t.Fatalf("%s: direct file count mismatch: gitdiff=%d direct=%d", label, len(ref), len(direct))
+	}
 	for i := range ref {
 		if !reflect.DeepEqual(ref[i], fast[i]) {
 			t.Errorf("%s: file %d differs:\n gitdiff: %+v\n fast:    %+v", label, i, ref[i], fast[i])
+			if i > 3 {
+				t.FailNow()
+			}
+		}
+		if !reflect.DeepEqual(ref[i], direct[i]) {
+			t.Errorf("%s: direct file %d differs:\n gitdiff: %+v\n direct:  %+v", label, i, ref[i], direct[i])
 			if i > 3 {
 				t.FailNow()
 			}
@@ -317,6 +374,209 @@ func TestFastParseLongLineSpillMatchesGitdiff(t *testing.T) {
 	diffBothParsers(t, []byte(patch), "long-line-spill")
 }
 
+func TestFastParseNativeHeaderIdentityEdges(t *testing.T) {
+	cases := map[string]string{
+		"invalid-author":    "Author: A <unterminated\nDate:   Mon Jan 2 15:04:05 2026 +0000\n",
+		"invalid-committer": "Author: A <a@x>\nCommit: C <unterminated\nAuthorDate: Mon Jan 2 15:04:05 2026 +0000\nCommitDate: Mon Jan 2 15:04:05 2026 +0000\n",
+		"missing-angles":    "Author: no-address\nDate:   Mon Jan 2 15:04:05 2026 +0000\n",
+		"unicode-identity":  "Author: Å User <å@example.com>\nDate:   Mon Jan 2 15:04:05 2026 +0000\n",
+	}
+	for name, fields := range cases {
+		patch := "commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" + fields +
+			"\n    title\n\ndiff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -0,0 +1 @@\n+value\n"
+		t.Run(name, func(t *testing.T) {
+			diffBothParsers(t, []byte(patch), name)
+		})
+	}
+}
+
+func TestFastParseNativeRecordsOwnData(t *testing.T) {
+	longA := strings.Repeat("a", 600<<10)
+	longB := strings.Repeat("b", 700<<10)
+	patch := "commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+		"Author: First Author <first@example.com>\n" +
+		"Date:   Mon Jan 2 15:04:05 2026 +0000\n\n" +
+		"    first message\n\n" +
+		"diff --git a/first.txt b/first.txt\n" +
+		"--- a/first.txt\n+++ b/first.txt\n@@ -0,0 +1 @@\n+" + longA + "\n" +
+		"commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" +
+		"Author: Second Author <second@example.com>\n" +
+		"Date:   Tue Feb 3 16:05:06 2026 +0000\n\n" +
+		"    second message\n\n" +
+		"diff --git a/second.txt b/second.txt\n" +
+		"--- a/second.txt\n+++ b/second.txt\n@@ -0,0 +1 @@\n+" + longB + "\n"
+
+	var files []fastGitFile
+	err := parseFastGitLog(strings.NewReader(patch), func(f fastGitFile) error {
+		files = append(files, f)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("file count = %d, want 2", len(files))
+	}
+
+	checks := []struct {
+		file      fastGitFile
+		wantName  string
+		wantSHA   string
+		wantAuth  string
+		wantRaw   string
+		wantStart int64
+	}{
+		{files[0], "first.txt", strings.Repeat("a", 40), "First Author", longA + "\n", 1},
+		{files[1], "second.txt", strings.Repeat("b", 40), "Second Author", longB + "\n", 1},
+	}
+	for _, check := range checks {
+		if check.file.newName != check.wantName {
+			t.Errorf("name = %q, want %q", check.file.newName, check.wantName)
+		}
+		if check.file.header == nil || check.file.header.sha != check.wantSHA {
+			t.Errorf("header SHA = %v, want %q", check.file.header, check.wantSHA)
+		}
+		if check.file.header == nil || !check.file.header.author.valid || check.file.header.author.name != check.wantAuth {
+			t.Errorf("author = %v, want %q", check.file.header, check.wantAuth)
+		}
+		if len(check.file.fragments) != 1 {
+			t.Errorf("fragment count = %d, want 1", len(check.file.fragments))
+			continue
+		}
+		if check.file.fragments[0].raw != check.wantRaw {
+			t.Errorf("raw data was overwritten: len = %d, want %d", len(check.file.fragments[0].raw), len(check.wantRaw))
+		}
+		if check.file.fragments[0].newPosition != check.wantStart {
+			t.Errorf("new position = %d, want %d", check.file.fragments[0].newPosition, check.wantStart)
+		}
+	}
+}
+
+type gitFragmentView struct {
+	raw        string
+	startLine  int
+	attributes map[string]string
+}
+
+func TestGitFragmentsFastPathMatchesGitdiffPath(t *testing.T) {
+	repo := t.TempDir()
+	runFastParseGit(t, repo, "init")
+	runFastParseGit(t, repo, "config", "user.name", "A User")
+	runFastParseGit(t, repo, "config", "user.email", "a@example.com")
+
+	write := func(name string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("keep.txt", []byte("base\n"))
+	write("skip.txt", []byte("skip base\n"))
+	write("binary.dat", []byte{0, 1, 2, 3, 4})
+	runFastParseGit(t, repo, "add", ".")
+	runFastParseGit(t, repo, "commit", "-m", "initial")
+
+	write("keep.txt", []byte("base\nsecret one\nsecret two\n"))
+	write("skip.txt", []byte("skip base\nsecret skipped\n"))
+	runFastParseGit(t, repo, "add", ".")
+	runFastParseGit(t, repo, "commit", "-m", "update")
+	runFastParseGit(t, repo, "rm", "keep.txt")
+	runFastParseGit(t, repo, "commit", "-m", "delete")
+
+	ctx := t.Context()
+	generalCmd, err := newGitLogScanCmdContext(ctx, repo, "--full-history --all --diff-filter=tuxdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	general := collectGitFragmentViews(t, &Git{
+		Cmd:        generalCmd,
+		ShouldSkip: func(attrs map[string]string) bool { return attrs[AttrPath] == "skip.txt" },
+		Platform:   scm.GitHubPlatform,
+		RemoteURL:  "https://example.com/acme/repo",
+		Sema:       semgroup.NewGroup(ctx, 4),
+	})
+
+	cmd, err := newGitLogScanCmdContext(ctx, repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collectGitFragmentViews(t, &Git{
+		Cmd:        cmd,
+		ShouldSkip: func(attrs map[string]string) bool { return attrs[AttrPath] == "skip.txt" },
+		Platform:   scm.GitHubPlatform,
+		RemoteURL:  "https://example.com/acme/repo",
+		Sema:       semgroup.NewGroup(ctx, 4),
+	})
+	if !reflect.DeepEqual(got, general) {
+		t.Fatalf("native fragments differ from gitdiff path:\n got: %#v\n gitdiff: %#v", got, general)
+	}
+}
+
+func TestGitLogCmdDiffFilesChannelCompatibility(t *testing.T) {
+	repo := t.TempDir()
+	runFastParseGit(t, repo, "init")
+	runFastParseGit(t, repo, "config", "user.name", "A User")
+	runFastParseGit(t, repo, "config", "user.email", "a@example.com")
+	for i := range 70 {
+		name := filepath.Join(repo, fmt.Sprintf("file-%02d.txt", i))
+		if err := os.WriteFile(name, []byte("content\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runFastParseGit(t, repo, "add", ".")
+	runFastParseGit(t, repo, "commit", "-m", "many files")
+
+	cmd, err := NewGitLogCmdContext(t.Context(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := cmd.DiffFilesCh()
+	if second := cmd.DiffFilesCh(); first != second {
+		t.Fatal("DiffFilesCh returned a different channel on its second call")
+	}
+	files := 0
+	for range first {
+		files++
+	}
+	if files != 70 {
+		t.Fatalf("file count = %d, want 70", files)
+	}
+	for err := range cmd.ErrCh() {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func collectGitFragmentViews(t *testing.T, source *Git) []gitFragmentView {
+	t.Helper()
+	var mu sync.Mutex
+	var views []gitFragmentView
+	err := source.Fragments(t.Context(), func(fragment Fragment, err error) error {
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		views = append(views, gitFragmentView{
+			raw:        fragment.Raw,
+			startLine:  fragment.StartLine,
+			attributes: maps.Clone(fragment.Attributes),
+		})
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(views, func(i, j int) bool {
+		left := views[i].attributes[AttrGitSHA] + "\x00" + views[i].attributes[AttrPath] + "\x00" + strconv.Itoa(views[i].startLine) + "\x00" + views[i].raw
+		right := views[j].attributes[AttrGitSHA] + "\x00" + views[j].attributes[AttrPath] + "\x00" + strconv.Itoa(views[j].startLine) + "\x00" + views[j].raw
+		return left < right
+	})
+	return views
+}
+
 func TestFastParseGeneratedValidStreams(t *testing.T) {
 	const seeds = 5000
 	for seed := int64(0); seed < seeds; seed++ {
@@ -363,6 +623,42 @@ func BenchmarkFastParseGitLog(b *testing.B) {
 			fastParseBenchmarkSink += consumeParsedFiles(ch)
 		}
 	})
+
+	b.Run("native-sync", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			n := 0
+			err := parseFastGitLog(bytes.NewReader(patch), func(f fastGitFile) error {
+				n += consumeFastFile(f)
+				return nil
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			fastParseBenchmarkSink += n
+		}
+	})
+
+	b.Run("native-async", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			n := 0
+			for f := range asyncFastFiles(patch) {
+				n += consumeFastFile(f)
+			}
+			fastParseBenchmarkSink += n
+		}
+	})
+
+	for _, batchSize := range []int{4, 16, 64, 128, 256} {
+		b.Run(fmt.Sprintf("native-batch-%d", batchSize), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				fastParseBenchmarkSink += consumeFastBatches(asyncFastGitLogBatches(b.Context(), bytes.NewReader(patch), batchSize))
+			}
+		})
+	}
+
 }
 
 func consumeParsedFiles(ch <-chan *gitdiff.File) int {
@@ -381,6 +677,44 @@ func consumeParsedFiles(ch <-chan *gitdiff.File) int {
 				n += int(tf.NewPosition)
 				n += len(tf.Raw(gitdiff.OpAdd))
 			}
+		}
+	}
+	return n
+}
+
+func consumeFastFile(f fastGitFile) int {
+	if f.isDelete {
+		return 0
+	}
+	n := len(f.newName)
+	if f.header != nil {
+		n += len(f.header.sha)
+		n += len(f.header.message)
+	}
+	for _, fragment := range f.fragments {
+		n += int(fragment.newPosition)
+		n += len(fragment.raw)
+	}
+	return n
+}
+
+func asyncFastFiles(patch []byte) <-chan fastGitFile {
+	out := make(chan fastGitFile, 64)
+	go func() {
+		defer close(out)
+		_ = parseFastGitLog(bytes.NewReader(patch), func(f fastGitFile) error {
+			out <- f
+			return nil
+		})
+	}()
+	return out
+}
+
+func consumeFastBatches(ch <-chan []fastGitFile) int {
+	n := 0
+	for batch := range ch {
+		for _, f := range batch {
+			n += consumeFastFile(f)
 		}
 	}
 	return n
@@ -666,4 +1000,119 @@ func BenchmarkFastParseGitLogConstructed(b *testing.B) {
 			b.Fatal("no files parsed")
 		}
 	}
+}
+
+func BenchmarkFastParseGitLogConstructedComparison(b *testing.B) {
+	unit := buildLogStream(3, []byte("dir/sub/file.go"), []byte("multi word message"), []byte("secret = value"), 0xff)
+	patch := bytes.Repeat(unit, 512)
+	b.SetBytes(int64(len(patch)))
+
+	b.Run("adapter", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			ch, err := fastParseGitLog(bytes.NewReader(patch))
+			if err != nil {
+				b.Fatal(err)
+			}
+			fastParseBenchmarkSink += consumeParsedFiles(ch)
+		}
+	})
+
+	b.Run("native-sync", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			n := 0
+			err := parseFastGitLog(bytes.NewReader(patch), func(f fastGitFile) error {
+				n += consumeFastFile(f)
+				return nil
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			fastParseBenchmarkSink += n
+		}
+	})
+
+	b.Run("native-async", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			n := 0
+			for f := range asyncFastFiles(patch) {
+				n += consumeFastFile(f)
+			}
+			fastParseBenchmarkSink += n
+		}
+	})
+
+	for _, batchSize := range []int{4, 16, 64, 128, 256} {
+		b.Run(fmt.Sprintf("native-batch-%d", batchSize), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				fastParseBenchmarkSink += consumeFastBatches(asyncFastGitLogBatches(b.Context(), bytes.NewReader(patch), batchSize))
+			}
+		})
+	}
+
+}
+
+func BenchmarkFastParseGitLogPatch(b *testing.B) {
+	path := os.Getenv("BETTERLEAKS_TEST_PATCH")
+	if path == "" {
+		b.Skip("BETTERLEAKS_TEST_PATCH not set")
+	}
+	patch, err := os.ReadFile(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("adapter", func(b *testing.B) {
+		b.SetBytes(int64(len(patch)))
+		b.ReportAllocs()
+		for b.Loop() {
+			ch, err := fastParseGitLog(bytes.NewReader(patch))
+			if err != nil {
+				b.Fatal(err)
+			}
+			fastParseBenchmarkSink += consumeParsedFiles(ch)
+		}
+	})
+
+	b.Run("native-sync", func(b *testing.B) {
+		b.SetBytes(int64(len(patch)))
+		b.ReportAllocs()
+		for b.Loop() {
+			n := 0
+			err := parseFastGitLog(bytes.NewReader(patch), func(f fastGitFile) error {
+				n += consumeFastFile(f)
+				return nil
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			fastParseBenchmarkSink += n
+		}
+	})
+
+	b.Run("native-async", func(b *testing.B) {
+		b.SetBytes(int64(len(patch)))
+		b.ReportAllocs()
+		for b.Loop() {
+			n := 0
+			for f := range asyncFastFiles(patch) {
+				n += consumeFastFile(f)
+			}
+			fastParseBenchmarkSink += n
+		}
+	})
+
+	for _, batchSize := range []int{4, 16, 64, 128, 256} {
+		b.Run(fmt.Sprintf("native-batch-%d", batchSize), func(b *testing.B) {
+			b.SetBytes(int64(len(patch)))
+			b.ReportAllocs()
+			for b.Loop() {
+				fastParseBenchmarkSink += consumeFastBatches(asyncFastGitLogBatches(b.Context(), bytes.NewReader(patch), batchSize))
+			}
+		})
+	}
+
 }

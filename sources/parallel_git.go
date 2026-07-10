@@ -243,20 +243,16 @@ func newGitLogCommitsCmd(ctx context.Context, source string, commits []string) (
 		}
 	}()
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go listenForStdErr(stderr, errCh)
 
-	gitdiffFiles, err := fastParseGitLog(stdout)
-	if err != nil {
-		return nil, err
+	gitCmd := &GitCmd{
+		cmd:      cmd,
+		errCh:    errCh,
+		repoPath: sourceClean,
 	}
-
-	return &GitCmd{
-		cmd:         cmd,
-		diffFilesCh: gitdiffFiles,
-		errCh:       errCh,
-		repoPath:    sourceClean,
-	}, nil
+	configureFastGitScan(ctx, gitCmd, stdout)
+	return gitCmd, nil
 }
 
 // startGitLogCmd is the shared tail for starting a git log process, wiring up
@@ -282,25 +278,28 @@ func startGitLogCmd(ctx context.Context, repoPath string, args []string, hasUser
 		return nil, err
 	}
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go listenForStdErr(stderr, errCh)
 
+	gitCmd := &GitCmd{
+		cmd:      cmd,
+		errCh:    errCh,
+		repoPath: repoPath,
+	}
 	var gitdiffFiles <-chan *gitdiff.File
 	if hasUserOpts {
 		gitdiffFiles, err = gitdiff.Parse(stdout)
 	} else {
-		gitdiffFiles, err = fastParseGitLog(stdout)
+		configureFastGitScan(ctx, gitCmd, stdout)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	return &GitCmd{
-		cmd:         cmd,
-		diffFilesCh: gitdiffFiles,
-		errCh:       errCh,
-		repoPath:    repoPath,
-	}, nil
+	if gitdiffFiles != nil {
+		gitCmd.diffFilesCh = gitdiffFiles
+	}
+	return gitCmd, nil
 }
 
 // listCommits returns all commit SHAs matching the given log options.

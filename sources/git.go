@@ -28,10 +28,12 @@ import (
 
 // GitCmd helps to work with Git's output.
 type GitCmd struct {
-	cmd         *exec.Cmd
-	diffFilesCh <-chan *gitdiff.File
-	errCh       <-chan error
-	repoPath    string
+	cmd           *exec.Cmd
+	diffFilesCh   <-chan *gitdiff.File
+	fastBatchesCh <-chan []fastGitFile
+	errCh         <-chan error
+	repoPath      string
+	cancelFastLog context.CancelFunc
 }
 
 // gitBinary resolves the git executable used for all scan subprocesses.
@@ -162,6 +164,17 @@ func NewGitLogCmd(source string, logOpts string) (*GitCmd, error) {
 // NewGitLogCmdContext is the same as NewGitLogCmd but supports passing in a
 // context to use for timeouts
 func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*GitCmd, error) {
+	return newGitLogCmdContext(ctx, source, logOpts, false)
+}
+
+// newGitLogScanCmdContext starts a Git log command whose default-shaped
+// stdout is consumed directly by Git.Fragments. It remains private because a
+// native scan command intentionally has no public DiffFilesCh stream.
+func newGitLogScanCmdContext(ctx context.Context, source string, logOpts string) (*GitCmd, error) {
+	return newGitLogCmdContext(ctx, source, logOpts, true)
+}
+
+func newGitLogCmdContext(ctx context.Context, source string, logOpts string, directScan bool) (*GitCmd, error) {
 	sourceClean := filepath.Clean(source)
 	var cmd *exec.Cmd
 	hasUserOpts := logOpts != ""
@@ -195,15 +208,22 @@ func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*G
 		return nil, err
 	}
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go listenForStdErr(stderr, errCh)
 
 	// User --log-opts can change the stream format (--pretty, -U3, ...);
 	// only the default betterleaks-shaped stream goes through the fast
 	// parser (see fastParseGitLog).
+	gitCmd := &GitCmd{
+		cmd:      cmd,
+		errCh:    errCh,
+		repoPath: sourceClean,
+	}
 	var gitdiffFiles <-chan *gitdiff.File
 	if hasUserOpts {
 		gitdiffFiles, err = gitdiff.Parse(stdout)
+	} else if directScan {
+		configureFastGitScan(ctx, gitCmd, stdout)
 	} else {
 		gitdiffFiles, err = fastParseGitLog(stdout)
 	}
@@ -211,12 +231,16 @@ func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*G
 		return nil, err
 	}
 
-	return &GitCmd{
-		cmd:         cmd,
-		diffFilesCh: gitdiffFiles,
-		errCh:       errCh,
-		repoPath:    sourceClean,
-	}, nil
+	if gitdiffFiles != nil {
+		gitCmd.diffFilesCh = gitdiffFiles
+	}
+	return gitCmd, nil
+}
+
+func configureFastGitScan(ctx context.Context, cmd *GitCmd, r io.Reader) {
+	parserCtx, cancel := context.WithCancel(ctx)
+	cmd.cancelFastLog = cancel
+	cmd.fastBatchesCh = asyncFastGitLogBatches(parserCtx, r, fastGitBatchSize)
 }
 
 // splitGitLogOpts parses user-provided --log-opts with a small shell-inspired
@@ -230,7 +254,7 @@ func NewGitLogCmdContext(ctx context.Context, source string, logOpts string) (*G
 //
 // This is intentionally not a full shell parser: no variable expansion,
 // command substitution, glob expansion, or other shell features. Also, a
-// standalone empty quoted token (for example '') is currently dropped.
+// standalone empty quoted token (for example ”) is currently dropped.
 func splitGitLogOpts(input string) ([]string, error) {
 	var (
 		args     []string
@@ -311,7 +335,7 @@ func NewGitDiffCmdContext(ctx context.Context, source string, staged bool) (*Git
 		return nil, err
 	}
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go listenForStdErr(stderr, errCh)
 
 	gitdiffFiles, err := gitdiff.Parse(stdout)
@@ -446,6 +470,17 @@ func rawAddedText(tf *gitdiff.TextFragment) string {
 	return tf.Raw(gitdiff.OpAdd)
 }
 
+type gitScanFile struct {
+	fastHeader    *fastGitHeader
+	diffHeader    *gitdiff.PatchHeader
+	newName       string
+	isDelete      bool
+	isBinary      bool
+	native        bool
+	fastFragments []fastGitFragment
+	diffFragments []*gitdiff.TextFragment
+}
+
 // Fragments yields fragments from a git repo
 func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	defer func() {
@@ -453,131 +488,19 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 			logging.Debug().Err(err).Str("cmd", s.Cmd.String()).Msg("command aborted")
 		}
 	}()
+	if s.Cmd.cancelFastLog != nil {
+		defer s.Cmd.cancelFastLog()
+	}
 
-	var (
-		diffFilesCh = s.Cmd.DiffFilesCh()
-		errCh       = s.Cmd.ErrCh()
-		wg          sync.WaitGroup
-	)
-
-	// loop to range over both DiffFiles (stdout) and ErrCh (stderr)
-	for diffFilesCh != nil || errCh != nil {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case gitdiffFile, open := <-diffFilesCh:
-			if !open {
-				diffFilesCh = nil
-				break
-			}
-
-			if gitdiffFile.IsDelete {
-				continue
-			}
-
-			// skip non-archive binary files
-			yieldAsArchive := false
-			if gitdiffFile.IsBinary {
-				if !isArchive(ctx, gitdiffFile.NewName) {
-					continue
-				}
-				yieldAsArchive = true
-			}
-
-			// Build commit attributes and check prefilter / allowlists before
-			// allocating goroutines or fragment memory.
-			commitSHA := ""
-			commitAttrs := make(map[string]string)
-			if gitdiffFile.PatchHeader != nil {
-				commitSHA = gitdiffFile.PatchHeader.SHA
-				commitAttrs[AttrGitSHA] = commitSHA
-				commitAttrs[AttrGitMessage] = gitdiffFile.PatchHeader.Message()
-				commitAttrs[AttrResource] = ResourceGitPatchContent
-				commitAttrs[AttrPath] = gitdiffFile.NewName
-				if s.RemoteURL != "" {
-					commitAttrs[AttrGitRemoteURL] = s.RemoteURL
-					commitAttrs[AttrGitPlatform] = s.Platform.String()
-				}
-				if !gitdiffFile.PatchHeader.AuthorDate.IsZero() {
-					commitAttrs[AttrGitDate] = gitdiffFile.PatchHeader.AuthorDate.UTC().Format(time.RFC3339)
-				}
-				if gitdiffFile.PatchHeader.Author != nil {
-					commitAttrs[AttrGitAuthorName] = gitdiffFile.PatchHeader.Author.Name
-					commitAttrs[AttrGitAuthorEmail] = gitdiffFile.PatchHeader.Author.Email
-				}
-
-				if shouldSkipAttrs(s.ShouldSkip, commitAttrs) {
-					logging.Trace().
-						Str("commit", commitSHA).
-						Str("path", gitdiffFile.NewName).
-						Msg("skipping diff entry: global prefilter")
-					continue
-				}
-			}
-
-			wg.Add(1)
-			s.Sema.Go(func() error {
-				defer wg.Done()
-
-				if yieldAsArchive {
-					blob, err := s.Cmd.NewBlobReaderContext(ctx, commitSHA, gitdiffFile.NewName)
-					if err != nil {
-						logging.Error().Err(err).Msg("could not read archive blob")
-						return nil
-					}
-
-					file := File{
-						Content:         blob,
-						Path:            gitdiffFile.NewName,
-						MaxArchiveDepth: s.MaxArchiveDepth,
-						ShouldSkip:      s.ShouldSkip,
-					}
-
-					// enrich and yield fragments
-					err = file.Fragments(ctx, func(fragment Fragment, err error) error {
-						// create base attributes of the commit
-						attrs := maps.Clone(commitAttrs)
-						// add fragment-specific attributes (in case attributes have been enriched by the file source)
-						maps.Copy(attrs, fragment.Attributes)
-						// set the merged attributes back to the fragment that will be yielded
-						fragment.Attributes = attrs
-						return yield(fragment, err)
-					})
-
-					// Close the blob reader and log any issues
-					if err := blob.Close(); err != nil {
-						logging.Debug().Err(err).Msg("blobReader.Close() returned an error")
-					}
-
-					return err
-				}
-
-				for _, textFragment := range gitdiffFile.TextFragments {
-					if textFragment == nil {
-						return nil
-					}
-					fragment := Fragment{
-						Raw:        rawAddedText(textFragment),
-						StartLine:  int(textFragment.NewPosition),
-						Attributes: commitAttrs,
-					}
-					fragment.SetAttr(AttrPath, gitdiffFile.NewName)
-
-					if err := yield(fragment, nil); err != nil {
-						return err
-					}
-				}
-
-				return nil
-			})
-		case err, open := <-errCh:
-			if !open {
-				errCh = nil
-				break
-			}
-
-			return yield(Fragment{}, err)
-		}
+	var wg sync.WaitGroup
+	var err error
+	if s.Cmd.fastBatchesCh != nil {
+		err = s.consumeFastBatches(ctx, yield, &wg)
+	} else {
+		err = s.consumeDiffFiles(ctx, yield, &wg)
+	}
+	if err != nil {
+		return err
 	}
 
 	select {
@@ -587,6 +510,208 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		wg.Wait()
 		return nil
 	}
+}
+
+func (s *Git) consumeFastBatches(ctx context.Context, yield FragmentsFunc, wg *sync.WaitGroup) error {
+	fastBatchesCh := s.Cmd.fastBatchesCh
+	errCh := s.Cmd.ErrCh()
+	for fastBatchesCh != nil || errCh != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case batch, open := <-fastBatchesCh:
+			if !open {
+				fastBatchesCh = nil
+				continue
+			}
+			for _, f := range batch {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				s.scheduleGitFile(ctx, yield, wg, gitScanFile{
+					fastHeader:    f.header,
+					newName:       f.newName,
+					isDelete:      f.isDelete,
+					isBinary:      f.isBinary,
+					native:        true,
+					fastFragments: f.fragments,
+				})
+			}
+		case err, open := <-errCh:
+			if !open {
+				errCh = nil
+				continue
+			}
+			return yield(Fragment{}, err)
+		}
+	}
+	return nil
+}
+
+func (s *Git) consumeDiffFiles(ctx context.Context, yield FragmentsFunc, wg *sync.WaitGroup) error {
+	diffFilesCh := s.Cmd.DiffFilesCh()
+	errCh := s.Cmd.ErrCh()
+	for diffFilesCh != nil || errCh != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case f, open := <-diffFilesCh:
+			if !open {
+				diffFilesCh = nil
+				continue
+			}
+			s.scheduleGitFile(ctx, yield, wg, gitScanFile{
+				diffHeader:    f.PatchHeader,
+				newName:       f.NewName,
+				isDelete:      f.IsDelete,
+				isBinary:      f.IsBinary,
+				diffFragments: f.TextFragments,
+			})
+		case err, open := <-errCh:
+			if !open {
+				errCh = nil
+				continue
+			}
+			return yield(Fragment{}, err)
+		}
+	}
+	return nil
+}
+
+func (s *Git) scheduleGitFile(ctx context.Context, yield FragmentsFunc, wg *sync.WaitGroup, scanFile gitScanFile) {
+	if scanFile.isDelete {
+		return
+	}
+
+	yieldAsArchive := false
+	if scanFile.isBinary {
+		if !isArchive(ctx, scanFile.newName) {
+			return
+		}
+		yieldAsArchive = true
+	}
+
+	var (
+		commitSHA         string
+		commitMessage     string
+		commitDate        time.Time
+		commitAuthorName  string
+		commitAuthorEmail string
+		hasHeader         bool
+		hasAuthor         bool
+	)
+	if scanFile.native {
+		if h := scanFile.fastHeader; h != nil {
+			hasHeader = true
+			commitSHA = h.sha
+			commitMessage = h.message
+			commitDate = h.authorDate
+			if h.author.valid {
+				hasAuthor = true
+				commitAuthorName = h.author.name
+				commitAuthorEmail = h.author.email
+			}
+		}
+	} else if h := scanFile.diffHeader; h != nil {
+		hasHeader = true
+		commitSHA = h.SHA
+		commitMessage = h.Message()
+		commitDate = h.AuthorDate
+		if h.Author != nil {
+			hasAuthor = true
+			commitAuthorName = h.Author.Name
+			commitAuthorEmail = h.Author.Email
+		}
+	}
+
+	commitAttrs := make(map[string]string)
+	if hasHeader {
+		commitAttrs[AttrGitSHA] = commitSHA
+		commitAttrs[AttrGitMessage] = commitMessage
+		commitAttrs[AttrResource] = ResourceGitPatchContent
+		commitAttrs[AttrPath] = scanFile.newName
+		if s.RemoteURL != "" {
+			commitAttrs[AttrGitRemoteURL] = s.RemoteURL
+			commitAttrs[AttrGitPlatform] = s.Platform.String()
+		}
+		if !commitDate.IsZero() {
+			commitAttrs[AttrGitDate] = commitDate.UTC().Format(time.RFC3339)
+		}
+		if hasAuthor {
+			commitAttrs[AttrGitAuthorName] = commitAuthorName
+			commitAttrs[AttrGitAuthorEmail] = commitAuthorEmail
+		}
+
+		if shouldSkipAttrs(s.ShouldSkip, commitAttrs) {
+			logging.Trace().
+				Str("commit", commitSHA).
+				Str("path", scanFile.newName).
+				Msg("skipping diff entry: global prefilter")
+			return
+		}
+	}
+
+	wg.Add(1)
+	s.Sema.Go(func() error {
+		defer wg.Done()
+
+		if yieldAsArchive {
+			blob, err := s.Cmd.NewBlobReaderContext(ctx, commitSHA, scanFile.newName)
+			if err != nil {
+				logging.Error().Err(err).Msg("could not read archive blob")
+				return nil
+			}
+
+			file := File{
+				Content:         blob,
+				Path:            scanFile.newName,
+				MaxArchiveDepth: s.MaxArchiveDepth,
+				ShouldSkip:      s.ShouldSkip,
+			}
+
+			err = file.Fragments(ctx, func(fragment Fragment, err error) error {
+				attrs := maps.Clone(commitAttrs)
+				maps.Copy(attrs, fragment.Attributes)
+				fragment.Attributes = attrs
+				return yield(fragment, err)
+			})
+			if err := blob.Close(); err != nil {
+				logging.Debug().Err(err).Msg("blobReader.Close() returned an error")
+			}
+			return err
+		}
+
+		if scanFile.native {
+			for _, textFragment := range scanFile.fastFragments {
+				fragment := Fragment{
+					Raw:        textFragment.raw,
+					StartLine:  int(textFragment.newPosition),
+					Attributes: commitAttrs,
+				}
+				fragment.SetAttr(AttrPath, scanFile.newName)
+				if err := yield(fragment, nil); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+
+		for _, textFragment := range scanFile.diffFragments {
+			if textFragment == nil {
+				return nil
+			}
+			fragment := Fragment{
+				Raw:        rawAddedText(textFragment),
+				StartLine:  int(textFragment.NewPosition),
+				Attributes: commitAttrs,
+			}
+			fragment.SetAttr(AttrPath, scanFile.newName)
+			if err := yield(fragment, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ResolveRemote resolves the SCM platform and remote URL for the given source.

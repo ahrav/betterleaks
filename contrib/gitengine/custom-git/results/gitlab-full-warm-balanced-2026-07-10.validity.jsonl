@@ -1,0 +1,2 @@
+{"jsonl_row":1,"reason":"gix 100-commit comparison PIDs 91983 and 92141 overlapped","validity":"quarantined_due_to_overlap"}
+{"jsonl_row":9,"reason":"expected revision digest was mistyped; preflight aborted before scan","validity":"invalid_input_no_scan"}

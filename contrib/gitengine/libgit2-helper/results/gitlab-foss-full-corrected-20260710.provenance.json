@@ -1,0 +1,41 @@
+{
+  "benchmark_binary": "/tmp/betterleaks-gitengine-bench",
+  "benchmark_sha256": "e50ca7235bc4e1563a063520753471847f32d18408819b6921837789060d31bd",
+  "betterleaks_branch": "perf/05-fast-gitlog-parser",
+  "betterleaks_commit": "a5fecc01cdf9b7713621a17204d6d6f4b892224b",
+  "engine_source_sha256": "f44f0a429ce14de790d03278e5b20c4db39cbb8650e160913c85d16938f23559",
+  "expected": {
+    "canonical_bytes": 5417932516,
+    "digest": "15bf91a9c237467054c9e2f3e11f405109256231e5c7928d13621b2cdb7d6e72",
+    "files": 2791965,
+    "hunks": 20803689,
+    "records": 23792827,
+    "ref_digest": "d3a5a08289c2471fe300abcb50c58308fda1e43c78d2fd77fa667b608d3711d9",
+    "revision_digest": "16fd50d990ed2df94e6384a542c1aa2bfb2054fb83ca0aced917115a8f441eeb"
+  },
+  "helper_binary": "contrib/gitengine/libgit2-helper/betterleaks-libgit2-engine",
+  "helper_sha256": "192fad7f7d6413b3a541d19b786245b8147a6023b6f137802d12a915c3ab6037",
+  "isolation": {
+    "ignored_config_and_shared_attribute_levels": [
+      "PROGRAMDATA",
+      "SYSTEM",
+      "XDG",
+      "GLOBAL"
+    ],
+    "retained_config_levels": [
+      "LOCAL",
+      "WORKTREE"
+    ],
+    "repository_attributes_retained": true
+  },
+  "libgit2_version": "1.9.1",
+  "repo": "/Users/ahrav/Projects/benchmarks/gitlab-foss",
+  "result": {
+    "correctness_conclusion": "none; stopped before digest and count output",
+    "reason": "user_stopped_after_decisive_scalability_loss",
+    "status": "partial and quarantined",
+    "wall_seconds_observed_lower_bound": 1098
+  },
+  "run_kind": "single full correctness and resource gate, stopped after decisive scalability loss",
+  "workers": 10
+}

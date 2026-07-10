@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unsafe"
 
 	"github.com/gitleaks/go-gitdiff/gitdiff"
 )
@@ -83,9 +84,22 @@ type fastGitFile struct {
 	isBinary bool
 }
 
+// fastParseWindowSize is the read-window size. Measured on real corpora:
+// 256KB is ~5% slower (more refills/compactions), 1MB is neutral — 512KB
+// is the knee. Each concurrent parser owns one window.
+const fastParseWindowSize = 512 << 10
+
 func parseFastGitLog(r io.Reader, emit func(fastGitFile) error) error {
+	return parseFastGitLogSized(r, fastParseWindowSize, emit)
+}
+
+// parseFastGitLogSized is parseFastGitLog with an explicit window size,
+// exposed so tests can force lines and hunks to straddle refill and spill
+// boundaries.
+func parseFastGitLogSized(r io.Reader, bufSize int, emit func(fastGitFile) error) error {
 	p := fastLogParser{
-		r:    bufio.NewReaderSize(r, 64<<10),
+		r:    r,
+		buf:  make([]byte, bufSize),
 		emit: emit,
 	}
 	return p.run()
@@ -96,8 +110,13 @@ func parseFastGitLog(r io.Reader, emit func(fastGitFile) error) error {
 // This avoids retaining a second native fragment graph solely to reconstruct
 // the public compatibility representation after the file is complete.
 func parseFastGitLogCompat(r io.Reader, emit func(*gitdiff.File) error) error {
+	return parseFastGitLogCompatSized(r, fastParseWindowSize, emit)
+}
+
+func parseFastGitLogCompatSized(r io.Reader, bufSize int, emit func(*gitdiff.File) error) error {
 	p := fastLogParser{
-		r:          bufio.NewReaderSize(r, 64<<10),
+		r:          r,
+		buf:        make([]byte, bufSize),
 		emitCompat: emit,
 	}
 	return p.run()
@@ -144,44 +163,152 @@ func sendFastGitBatch(ctx context.Context, out chan<- []fastGitFile, batch []fas
 }
 
 type fastLogParser struct {
-	r          *bufio.Reader
+	r          io.Reader
 	emit       func(fastGitFile) error
 	emitCompat func(*gitdiff.File) error
 
+	// buf is the read window: buf[pos:end] holds buffered, unconsumed
+	// bytes. Refilled in place (readLineSlow) once the window is drained.
+	buf     []byte
+	pos     int
+	end     int
+	readErr error // sticky; the underlying reader is never called after it
+
 	// line is the current line, INCLUDING its trailing '\n' when present.
-	// It aliases the bufio buffer (or spill) and is only valid until the
-	// next readLine call.
+	// It aliases buf (or spill) and is only valid until the next readLine
+	// call: every consumer must copy what it keeps before advancing.
 	line  []byte
 	spill []byte // long-line spill buffer, reused
-	eof   bool
+
+	// arena accumulates added-line payloads. Each hunk's payloads are
+	// appended contiguously and the emitted raw string aliases that range
+	// via unsafe.String, so added bytes are copied exactly once (payload ->
+	// arena) instead of twice (payload -> builder -> string).
+	//
+	// SAFETY: aliasing a string over arena bytes is sound because chunks
+	// are append-only and never recycled: a grow copies the current hunk's
+	// prefix to a fresh chunk and abandons the old one, which stays alive
+	// (and unmodified) for exactly as long as any emitted string references
+	// it. Nothing ever writes to arena[:len(arena)].
+	arena []byte
+
+	// hdrBuf keeps a copy of the current `diff --git` header payload so
+	// the fallback name parse can be deferred to finishFile (where it runs
+	// only when no later header line named the file). Reused per file.
+	hdrBuf []byte
 
 	header       *fastGitHeader       // current native commit header, shared per commit
 	compatHeader *gitdiff.PatchHeader // compatibility commit header, shared per commit
 }
 
-// readLine advances to the next input line, spilling lines longer than the
-// bufio buffer. Sets p.eof at end of stream (p.line is empty then).
+// arenaChunkSize is the default allocation unit for the added-text arena.
+// Hunks larger than this get an exact-size private chunk.
+const arenaChunkSize = 64 << 10
+
+// readLine advances to the next input line. p.line is nil at end of
+// stream. The hot path is a single newline scan over the buffered window;
+// refill, end-of-stream, and window-overflow live in readLineSlow.
+//
+// (Two rejected alternatives, both measured slower on arm64: batch newline
+// pre-indexing per refill (+4-19% — second pass over the window doubles
+// cache traffic) and an inline 32-byte SWAR pre-scan before IndexByte
+// (+12% — the vectorized IndexByte prologue is already cheaper than
+// scalar SWAR at this ~30-byte average line length).)
 func (p *fastLogParser) readLine() {
-	if p.eof {
-		p.line = nil
+	if i := bytes.IndexByte(p.buf[p.pos:p.end], '\n'); i >= 0 {
+		p.line = p.buf[p.pos : p.pos+i+1]
+		p.pos += i + 1
 		return
 	}
-	line, err := p.r.ReadSlice('\n')
-	if err == bufio.ErrBufferFull {
-		// Rare: a line longer than the reader buffer (minified JS, etc.).
-		p.spill = append(p.spill[:0], line...)
-		for err == bufio.ErrBufferFull {
-			line, err = p.r.ReadSlice('\n')
-			p.spill = append(p.spill, line...)
-		}
-		p.line = p.spill
-	} else {
-		p.line = line
-	}
-	if err != nil && err != bufio.ErrBufferFull {
-		p.eof = true
-		if len(p.line) == 0 {
+	p.readLineSlow()
+}
+
+// readLineSlow handles the cold paths: compacting the window tail to the
+// front, refilling from the reader, the final unterminated line, and lines
+// longer than the window (spilled to a reusable side buffer).
+func (p *fastLogParser) readLineSlow() {
+	if p.readErr != nil {
+		if p.pos < p.end {
+			// Final line without trailing newline.
+			p.line = p.buf[p.pos:p.end]
+			p.pos = p.end
+		} else {
 			p.line = nil
+		}
+		return
+	}
+
+	// Compact the partial line (no newline in buf[pos:end]) to the front.
+	n := p.end - p.pos
+	if n > 0 && p.pos > 0 {
+		copy(p.buf, p.buf[p.pos:p.end])
+	}
+	p.pos, p.end = 0, n
+
+	emptyReads := 0
+	for {
+		if p.end == len(p.buf) {
+			// Rare: a line longer than the window (minified JS, etc.).
+			p.readLineSpill()
+			return
+		}
+		m, err := p.r.Read(p.buf[p.end:])
+		if m == 0 && err == nil {
+			// Misbehaving reader; mirror bufio's give-up guard.
+			if emptyReads++; emptyReads >= 100 {
+				err = io.ErrNoProgress
+			}
+		}
+		if m > 0 {
+			// Only the newly arrived bytes need scanning; everything
+			// before p.end was already checked.
+			if i := bytes.IndexByte(p.buf[p.end:p.end+m], '\n'); i >= 0 {
+				nl := p.end + i
+				p.end += m
+				p.line = p.buf[p.pos : nl+1]
+				p.pos = nl + 1
+				return
+			}
+			p.end += m
+		}
+		if err != nil {
+			p.readErr = err
+			if p.pos < p.end {
+				p.line = p.buf[p.pos:p.end]
+				p.pos = p.end
+			} else {
+				p.line = nil
+			}
+			return
+		}
+	}
+}
+
+// readLineSpill accumulates a longer-than-window line into p.spill.
+func (p *fastLogParser) readLineSpill() {
+	p.spill = append(p.spill[:0], p.buf[:p.end]...)
+	p.pos, p.end = 0, 0
+	emptyReads := 0
+	for {
+		m, err := p.r.Read(p.buf)
+		if m == 0 && err == nil {
+			if emptyReads++; emptyReads >= 100 {
+				err = io.ErrNoProgress
+			}
+		}
+		if m > 0 {
+			if i := bytes.IndexByte(p.buf[:m], '\n'); i >= 0 {
+				p.spill = append(p.spill, p.buf[:i+1]...)
+				p.pos, p.end = i+1, m
+				p.line = p.spill
+				return
+			}
+			p.spill = append(p.spill, p.buf[:m]...)
+		}
+		if err != nil {
+			p.readErr = err
+			p.line = p.spill // non-empty: holds at least the window bytes
+			return
 		}
 	}
 }
@@ -597,8 +724,10 @@ func (p *fastLogParser) parseFileDiff() error {
 	} else {
 		f.header = p.header
 	}
-	headerLine := chompNL(p.line)[len("diff --git "):]
-	defaultName := parseHeaderPathPair(string(headerLine))
+	// Defer the fallback-name parse (and its string conversion) to
+	// finishFile: on real streams a "+++"/"rename to"/"copy to" line names
+	// the file, and the header copy is much cheaper than parsing it.
+	p.hdrBuf = append(p.hdrBuf[:0], chompNL(p.line)[len("diff --git "):]...)
 
 	p.readLine()
 
@@ -653,17 +782,17 @@ func (p *fastLogParser) parseFileDiff() error {
 				f.isBinary = true
 			}
 			p.readLine()
-			err := p.finishFile(f, compatFile, newName, defaultName)
+			err := p.finishFile(f, compatFile, newName)
 			p.skipBinaryData()
 			return err
 		default:
 			// Unknown line ends the header (empty diff: mode-only change,
 			// or the stream moved on to the next commit/diff).
-			return p.finishFile(f, compatFile, newName, defaultName)
+			return p.finishFile(f, compatFile, newName)
 		}
 		p.readLine()
 	}
-	return p.finishFile(f, compatFile, newName, defaultName)
+	return p.finishFile(f, compatFile, newName)
 
 hunks:
 	for p.line != nil && bytes.HasPrefix(p.line, []byte("@@ -")) {
@@ -671,18 +800,16 @@ hunks:
 			break
 		}
 	}
-	return p.finishFile(f, compatFile, newName, defaultName)
+	return p.finishFile(f, compatFile, newName)
 }
 
 // finishFile resolves the file name exactly as betterleaks consumes it and
-// emits the file.
-func (p *fastLogParser) finishFile(f fastGitFile, compatFile *gitdiff.File, newName, defaultName string) error {
-	var resolvedName string
-	switch {
-	case newName != "":
-		resolvedName = newName
-	case defaultName != "":
-		resolvedName = defaultName
+// emits the file. The `diff --git` fallback name (stashed in hdrBuf) is
+// parsed only when no later header line named the file.
+func (p *fastLogParser) finishFile(f fastGitFile, compatFile *gitdiff.File, newName string) error {
+	resolvedName := newName
+	if resolvedName == "" {
+		resolvedName = parseHeaderPathPair(string(p.hdrBuf))
 	}
 	if compatFile != nil {
 		compatFile.NewName = resolvedName
@@ -734,72 +861,78 @@ func (p *fastLogParser) parseHunk(f *fastGitFile, compatFile *gitdiff.File) bool
 	oldStart, oldCount := parseRangeBytes(ranges[:sp])
 	newStart, newCount := parseRangeBytes(ranges[sp+2:])
 
-	var added strings.Builder
+	// Added-line payloads are appended WITH their trailing newline into the
+	// shared arena; the only case where the joined string must not end in
+	// '\n' is a trailing "\ No newline at end of file" marker for the new
+	// side, handled after the loop by stripping the final byte.
+	hunkStart := len(p.arena)
 	oldLeft, newLeft := oldCount, newCount
 	lastWasAdd := false
-	pendingAddNewline := false
-	flushPendingAddNewline := func() {
-		if pendingAddNewline {
-			added.WriteByte('\n')
-			pendingAddNewline = false
-		}
-	}
 
 	p.readLine()
-	for (oldLeft > 0 || newLeft > 0) && p.line != nil {
-		line := p.line
-		op := line[0]
-		switch op {
+	// The body loop consumes ~98% of all input lines, so its state (the
+	// current line and the window cursor) lives in locals: this keeps the
+	// per-line slice-header update out of the heap-resident parser struct
+	// (store + write barrier measured ~12% of parse time) and readLine's
+	// fast path inline (its cost exceeds the inlining budget). Locals are
+	// synced with the struct around every slow-path call.
+	line, buf, pos := p.line, p.buf, p.pos
+	for (oldLeft > 0 || newLeft > 0) && line != nil {
+		switch line[0] {
 		case '+':
 			newLeft--
-			flushPendingAddNewline()
 			payload := line[1:]
-			if n := len(payload); n > 0 && payload[n-1] == '\n' {
-				added.Write(payload[:n-1])
-				pendingAddNewline = true
-			} else {
-				added.Write(payload)
+			if len(p.arena)+len(payload) > cap(p.arena) {
+				hunkStart = p.growArena(hunkStart, len(payload))
 			}
+			p.arena = append(p.arena, payload...)
 			lastWasAdd = true
 		case '-':
-			flushPendingAddNewline()
 			oldLeft--
 			lastWasAdd = false
 		case ' ', '\n':
-			flushPendingAddNewline()
 			oldLeft--
 			newLeft--
 			lastWasAdd = false
 		case '\\':
 			// "\ No newline at end of file" for the OLD side mid-hunk;
-			// doesn't consume a counter.
-			flushPendingAddNewline()
-			p.readLine()
-			continue
+			// consumes no counter — falls to the shared line advance.
 		default:
-			// Malformed/truncated; stop consuming.
-			flushPendingAddNewline()
+			// Malformed/truncated; stop consuming (loop condition fails).
 			oldLeft, newLeft = 0, 0
 			continue
 		}
-		p.readLine()
+		// Inlined readLine fast path over the local cursor.
+		if i := bytes.IndexByte(buf[pos:p.end], '\n'); i >= 0 {
+			line = buf[pos : pos+i+1]
+			pos += i + 1
+		} else {
+			p.pos = pos
+			p.readLineSlow()
+			line, buf, pos = p.line, p.buf, p.pos
+		}
 	}
+	p.line, p.pos = line, pos
 
 	// Trailing "\ No newline at end of file": strips the final newline of
 	// the last emitted line (only affects Raw when that line was an add).
+	// Shrinking the arena is safe: the dropped byte was never exposed.
 	if p.line != nil && len(p.line) >= 2 && p.line[0] == '\\' && p.line[1] == ' ' {
-		if lastWasAdd {
-			pendingAddNewline = false
+		if n := len(p.arena); lastWasAdd && n > hunkStart && p.arena[n-1] == '\n' {
+			p.arena = p.arena[:n-1]
 		}
 		p.readLine()
-	} else {
-		flushPendingAddNewline()
 	}
 
-	hasLines := added.Len() > 0 || newCount > 0
+	hunkLen := len(p.arena) - hunkStart
+	hasLines := hunkLen > 0 || newCount > 0
 	var raw string
-	if hasLines {
-		raw = added.String()
+	if hunkLen > 0 {
+		// Alias the string over the arena range — the strings.Builder
+		// trick. Sound because the range [hunkStart, len(arena)) is
+		// append-only and this parser never rewrites exposed arena bytes
+		// (growArena moves to a fresh chunk instead of recycling).
+		raw = unsafe.String(&p.arena[hunkStart], hunkLen)
 	}
 	if compatFile != nil {
 		fragment := &gitdiff.TextFragment{
@@ -820,6 +953,27 @@ func (p *fastLogParser) parseHunk(f *fastGitFile, compatFile *gitdiff.File) bool
 		})
 	}
 	return true
+}
+
+// growArena starts a fresh arena chunk, carrying over the current hunk's
+// prefix. The old chunk is abandoned, NOT recycled: emitted strings alias
+// it, so it must stay unmodified for as long as they live (the GC frees it
+// once the last aliasing string drops). Copying only the current hunk's
+// prefix (not the whole chunk) keeps growth cost proportional to the hunk.
+// Returns the hunk's start offset in the new chunk (always 0).
+func (p *fastLogParser) growArena(hunkStart, need int) int {
+	hunkLen := len(p.arena) - hunkStart
+	size := arenaChunkSize
+	// Oversized hunk: private chunk with 2x headroom (append's own policy
+	// tapers to ~1.25x, which costs ~5x the final size in ramp garbage on
+	// multi-MB hunks).
+	if total := hunkLen + need; total > size/2 {
+		size = 2 * total
+	}
+	fresh := make([]byte, hunkLen, size)
+	copy(fresh, p.arena[hunkStart:])
+	p.arena = fresh
+	return 0
 }
 
 // parseRangeBytes parses "start[,count]"; count defaults to 1.

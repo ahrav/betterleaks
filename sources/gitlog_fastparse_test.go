@@ -345,6 +345,76 @@ func TestFastParseSyntheticShapes(t *testing.T) {
 	}
 }
 
+// TestFastParseSmallWindows forces hunks and lines to straddle window
+// refills (and spill entirely) by shrinking the read window far below
+// line and hunk sizes, then requires identical consumed output on BOTH
+// the native and compat paths. This is the aliasing torture test for the
+// window reader + arena accumulation: window bytes are only valid until
+// the next refill, so payload copies must happen before compaction/spill.
+func TestFastParseSmallWindows(t *testing.T) {
+	windows := []int{16, 37, 64, 253, 4096}
+
+	check := func(t *testing.T, patch []byte, label string) {
+		t.Helper()
+		refCh, err := gitdiff.Parse(bytes.NewReader(patch))
+		if err != nil {
+			t.Fatalf("%s: gitdiff.Parse: %v", label, err)
+		}
+		ref := collectViews(t, refCh)
+		for _, w := range windows {
+			var native []consumedView
+			err := parseFastGitLogSized(bytes.NewReader(patch), w, func(f fastGitFile) error {
+				if !f.isDelete {
+					native = append(native, viewOfFast(f))
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("%s(win=%d): native: %v", label, w, err)
+			}
+			var compat []consumedView
+			err = parseFastGitLogCompatSized(bytes.NewReader(patch), w, func(f *gitdiff.File) error {
+				if !f.IsDelete {
+					compat = append(compat, viewOf(f))
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("%s(win=%d): compat: %v", label, w, err)
+			}
+			if len(ref) != len(native) || len(ref) != len(compat) {
+				t.Fatalf("%s(win=%d): file count mismatch: gitdiff=%d native=%d compat=%d",
+					label, w, len(ref), len(native), len(compat))
+			}
+			for i := range ref {
+				if !reflect.DeepEqual(ref[i], native[i]) {
+					t.Fatalf("%s(win=%d): native file %d differs:\n gitdiff: %+v\n native:  %+v", label, w, i, ref[i], native[i])
+				}
+				if !reflect.DeepEqual(ref[i], compat[i]) {
+					t.Fatalf("%s(win=%d): compat file %d differs:\n gitdiff: %+v\n compat:  %+v", label, w, i, ref[i], compat[i])
+				}
+			}
+		}
+	}
+
+	for seed := int64(0); seed < 300; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		check(t, generatedPatchStream(rng, 1+rng.Intn(4)), fmt.Sprintf("seed-%d", seed))
+	}
+
+	// A hunk much larger than the smallest windows, with long lines.
+	var b strings.Builder
+	b.WriteString("commit ffffffffffffffffffffffffffffffffffffffff\n")
+	b.WriteString("Author: A <a@x>\nDate:   Mon Jan 2 15:04:05 2026 +0000\n\n    big hunk\n\n")
+	b.WriteString("diff --git a/big.txt b/big.txt\nindex 0000000..1111111 100644\n--- a/big.txt\n+++ b/big.txt\n")
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", 200)
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "+line %d %s\n", i, strings.Repeat("x", i%97))
+	}
+	b.WriteString("\\ No newline at end of file\n")
+	check(t, []byte(b.String()), "big-hunk")
+}
+
 // TestFastParseMatchesPatchFile checks a pre-captured patch stream file
 // (BETTERLEAKS_TEST_PATCH) — used to bisect mismatches on huge corpora.
 func TestFastParseMatchesPatchFile(t *testing.T) {

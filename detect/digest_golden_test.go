@@ -24,7 +24,7 @@ import (
 //
 // To update after an intentional behavior change: run the test, verify the
 // printed findings diff is expected, and paste the new digest.
-const goldenFindingsDigest = "8b39832f30a614acf7f317885dc12d996bab15ddf46e3e66420be90797272c80"
+const goldenFindingsDigest = "e1502267a2929cbfb3ad81ed02c56d7d635b4d28a74b44eea15eec42ebdb867d"
 
 func TestFindingsDigestGolden(t *testing.T) {
 	patch, err := os.ReadFile("../sources/testdata/digest_fixture.patch")

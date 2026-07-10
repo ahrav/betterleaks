@@ -3,6 +3,7 @@ package sources
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strconv"
@@ -38,14 +39,114 @@ func fastParseGitLog(r io.Reader) (<-chan *gitdiff.File, error) {
 	// (detector) instead of hand-off blocking per file like the unbuffered
 	// channel gitdiff.Parse returns.
 	out := make(chan *gitdiff.File, 64)
-	p := &fastLogParser{r: bufio.NewReaderSize(r, 512<<10), out: out}
-	go p.run()
+	go func() {
+		defer close(out)
+		_ = parseFastGitLogCompat(r, func(f *gitdiff.File) error {
+			out <- f
+			return nil
+		})
+	}()
 	return out, nil
 }
 
+// fastGitFragment is the parser-native hunk projection. It owns raw and may
+// outlive subsequent reads from the parser's reusable input buffer.
+type fastGitFragment struct {
+	newPosition int64
+	raw         string
+}
+
+type fastGitIdentity struct {
+	name  string
+	email string
+	valid bool
+}
+
+// fastGitHeader is the scanner-consumed commit projection. Native scan paths
+// do not construct gitdiff header or identity objects, and message is joined
+// once per commit instead of once per file.
+type fastGitHeader struct {
+	sha        string
+	message    string
+	author     fastGitIdentity
+	authorDate time.Time
+}
+
+// fastGitFile contains the fields needed by Git.Fragments without the
+// temporary gitdiff File/TextFragment/Line object graph.
+type fastGitFile struct {
+	header    *fastGitHeader
+	newName   string
+	fragments []fastGitFragment
+
+	isDelete bool
+	isBinary bool
+}
+
+func parseFastGitLog(r io.Reader, emit func(fastGitFile) error) error {
+	p := fastLogParser{
+		r:    bufio.NewReaderSize(r, 64<<10),
+		emit: emit,
+	}
+	return p.run()
+}
+
+// parseFastGitLogCompat uses the same parser state machine as the native
+// scanner path, but assembles gitdiff objects as each file and hunk is parsed.
+// This avoids retaining a second native fragment graph solely to reconstruct
+// the public compatibility representation after the file is complete.
+func parseFastGitLogCompat(r io.Reader, emit func(*gitdiff.File) error) error {
+	p := fastLogParser{
+		r:          bufio.NewReaderSize(r, 64<<10),
+		emitCompat: emit,
+	}
+	return p.run()
+}
+
+const fastGitBatchSize = 64
+
+func asyncFastGitLogBatches(ctx context.Context, r io.Reader, batchSize int) <-chan []fastGitFile {
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	channelSize := max(1, 64/batchSize)
+	out := make(chan []fastGitFile, channelSize)
+	go func() {
+		defer close(out)
+		batch := make([]fastGitFile, 0, batchSize)
+		err := parseFastGitLog(r, func(f fastGitFile) error {
+			batch = append(batch, f)
+			if len(batch) == cap(batch) {
+				if err := sendFastGitBatch(ctx, out, batch); err != nil {
+					return err
+				}
+				batch = make([]fastGitFile, 0, batchSize)
+			}
+			return nil
+		})
+		if err == nil && len(batch) > 0 {
+			_ = sendFastGitBatch(ctx, out, batch)
+		}
+	}()
+	return out
+}
+
+func sendFastGitBatch(ctx context.Context, out chan<- []fastGitFile, batch []fastGitFile) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case out <- batch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type fastLogParser struct {
-	r   *bufio.Reader
-	out chan *gitdiff.File
+	r          *bufio.Reader
+	emit       func(fastGitFile) error
+	emitCompat func(*gitdiff.File) error
 
 	// line is the current line, INCLUDING its trailing '\n' when present.
 	// It aliases the bufio buffer (or spill) and is only valid until the
@@ -54,7 +155,8 @@ type fastLogParser struct {
 	spill []byte // long-line spill buffer, reused
 	eof   bool
 
-	header *gitdiff.PatchHeader // current commit header, shared per commit
+	header       *fastGitHeader       // current native commit header, shared per commit
+	compatHeader *gitdiff.PatchHeader // compatibility commit header, shared per commit
 }
 
 // readLine advances to the next input line, spilling lines longer than the
@@ -84,23 +186,29 @@ func (p *fastLogParser) readLine() {
 	}
 }
 
-func (p *fastLogParser) run() {
-	defer close(p.out)
+func (p *fastLogParser) run() error {
 	// gitdiff.Parse starts with a non-nil empty header and only replaces it
 	// when a commit line is seen; mirror that so consumers observe the same
 	// PatchHeader nil-ness on streams without commit headers.
-	p.header = &gitdiff.PatchHeader{}
+	if p.emitCompat != nil {
+		p.compatHeader = &gitdiff.PatchHeader{}
+	} else {
+		p.header = &fastGitHeader{}
+	}
 	p.readLine()
 	for p.line != nil {
 		switch {
 		case bytes.HasPrefix(p.line, []byte("commit ")):
 			p.parseCommitHeader()
 		case bytes.HasPrefix(p.line, []byte("diff --git ")):
-			p.parseFileDiff()
+			if err := p.parseFileDiff(); err != nil {
+				return err
+			}
 		default:
 			p.readLine()
 		}
 	}
+	return nil
 }
 
 // chompNL returns line without its trailing newline.
@@ -118,7 +226,14 @@ var errCommitHeaderTooLong = errors.New("commit header line exceeds gitdiff scan
 // Field semantics mirror gitdiff's parseHeaderPretty + scanMessageTitle/Body
 // so PatchHeader.Message() output is unchanged.
 func (p *fastLogParser) parseCommitHeader() {
-	h := &gitdiff.PatchHeader{}
+	compat := p.emitCompat != nil
+	var h *fastGitHeader
+	var compatHeader *gitdiff.PatchHeader
+	if compat {
+		compatHeader = &gitdiff.PatchHeader{}
+	} else {
+		h = &fastGitHeader{}
+	}
 	// TrimSpace mirrors gitdiff.ParsePatchHeader, which trims the header
 	// line before prefix-matching. A "commit" line with only whitespace
 	// after it therefore fails gitdiff's `commit ` prefix check entirely:
@@ -128,14 +243,20 @@ func (p *fastLogParser) parseCommitHeader() {
 	// matching gitdiff exactly.
 	rest := bytes.TrimSpace(chompNL(p.line)[len("commit "):])
 	if len(rest) == 0 {
-		p.header = nil
+		p.setHeader(nil, nil, nil)
 		p.readLine()
 		return
 	}
+	var sha string
 	if i := bytes.IndexByte(rest, ' '); i > 0 {
-		h.SHA = string(rest[:i])
+		sha = string(rest[:i])
 	} else {
-		h.SHA = string(rest)
+		sha = string(rest)
+	}
+	if compat {
+		compatHeader.SHA = sha
+	} else {
+		h.sha = sha
 	}
 	p.readLine()
 
@@ -154,46 +275,66 @@ func (p *fastLogParser) parseCommitHeader() {
 		}
 		switch {
 		case bytes.HasPrefix(line, []byte("Author:")):
-			ident, err := gitdiff.ParsePatchIdentity(string(line[len("Author:"):]))
-			if err != nil {
-				hdrErr = err
+			if compat {
+				ident, err := gitdiff.ParsePatchIdentity(string(line[len("Author:"):]))
+				if err != nil {
+					hdrErr = err
+				} else {
+					compatHeader.Author = &ident
+				}
 			} else {
-				h.Author = &ident
+				ident, err := parseFastGitIdentity(line[len("Author:"):])
+				if err != nil {
+					hdrErr = err
+				} else {
+					h.author = ident
+				}
 			}
 		case bytes.HasPrefix(line, []byte("AuthorDate:")):
 			d, err := parseGitLogDate(strings.TrimSpace(string(line[len("AuthorDate:"):])))
 			if err != nil {
 				hdrErr = err
+			} else if compat {
+				compatHeader.AuthorDate = d
 			} else {
-				h.AuthorDate = d
+				h.authorDate = d
 			}
 		case bytes.HasPrefix(line, []byte("Date:")):
 			d, err := parseGitLogDate(strings.TrimSpace(string(line[len("Date:"):])))
 			if err != nil {
 				hdrErr = err
+			} else if compat {
+				compatHeader.AuthorDate = d
 			} else {
-				h.AuthorDate = d
+				h.authorDate = d
 			}
 		case bytes.HasPrefix(line, []byte("Commit:")):
-			ident, err := gitdiff.ParsePatchIdentity(string(line[len("Commit:"):]))
-			if err != nil {
-				hdrErr = err
+			if compat {
+				ident, err := gitdiff.ParsePatchIdentity(string(line[len("Commit:"):]))
+				if err != nil {
+					hdrErr = err
+				} else {
+					compatHeader.Committer = &ident
+				}
 			} else {
-				h.Committer = &ident
+				_, err := parseFastGitIdentity(line[len("Commit:"):])
+				if err != nil {
+					hdrErr = err
+				}
 			}
 		case bytes.HasPrefix(line, []byte("CommitDate:")):
 			d, err := parseGitLogDate(strings.TrimSpace(string(line[len("CommitDate:"):])))
 			if err != nil {
 				hdrErr = err
-			} else {
-				h.CommitterDate = d
+			} else if compat {
+				compatHeader.CommitterDate = d
 			}
 		}
 		p.readLine()
 		// A new commit or diff header inside the field block ends it
 		// (defensive; git always emits the blank line).
 		if p.line != nil && (bytes.HasPrefix(p.line, []byte("commit ")) || bytes.HasPrefix(p.line, []byte("diff --git "))) {
-			p.setHeader(h, hdrErr)
+			p.setHeader(h, compatHeader, hdrErr)
 			return
 		}
 	}
@@ -261,22 +402,46 @@ func (p *fastLogParser) parseCommitHeader() {
 		body.WriteString(l)
 	}
 
-	h.Title = title.String()
-	if h.Title != "" {
-		h.Body = body.String()
+	titleString := title.String()
+	if compat {
+		compatHeader.Title = titleString
+		if titleString != "" {
+			compatHeader.Body = body.String()
+		}
+	} else {
+		h.message = titleString
+		if titleString != "" {
+			if bodyString := body.String(); bodyString != "" {
+				h.message = titleString + "\n\n" + bodyString
+			}
+		}
 	}
-	p.setHeader(h, hdrErr)
+	p.setHeader(h, compatHeader, hdrErr)
+}
+
+func parseFastGitIdentity(line []byte) (fastGitIdentity, error) {
+	identity, err := gitdiff.ParsePatchIdentity(string(line))
+	if err != nil {
+		return fastGitIdentity{}, err
+	}
+	return fastGitIdentity{
+		name:  identity.Name,
+		email: identity.Email,
+		valid: true,
+	}, nil
 }
 
 // setHeader installs the parsed commit header, or nil when any field failed
 // to parse — mirroring gitdiff.Parse, which ignores ParsePatchHeader errors
 // and leaves subsequent files with a nil PatchHeader.
-func (p *fastLogParser) setHeader(h *gitdiff.PatchHeader, err error) {
+func (p *fastLogParser) setHeader(h *fastGitHeader, compatHeader *gitdiff.PatchHeader, err error) {
 	if err != nil {
 		p.header = nil
+		p.compatHeader = nil
 		return
 	}
 	p.header = h
+	p.compatHeader = compatHeader
 }
 
 func parseGitLogDate(s string) (time.Time, error) {
@@ -424,8 +589,14 @@ func daysInMonth(year, month int) int {
 
 // parseFileDiff consumes one `diff --git` block: extended headers, then
 // either hunks or a binary marker.
-func (p *fastLogParser) parseFileDiff() {
-	f := &gitdiff.File{PatchHeader: p.header}
+func (p *fastLogParser) parseFileDiff() error {
+	var f fastGitFile
+	var compatFile *gitdiff.File
+	if p.emitCompat != nil {
+		compatFile = &gitdiff.File{PatchHeader: p.compatHeader}
+	} else {
+		f.header = p.header
+	}
 	headerLine := chompNL(p.line)[len("diff --git "):]
 	defaultName := parseHeaderPathPair(string(headerLine))
 
@@ -443,17 +614,29 @@ func (p *fastLogParser) parseFileDiff() {
 		case bytes.HasPrefix(line, []byte("+++ ")):
 			newName = parseAbName(string(line[4:]))
 		case bytes.HasPrefix(line, []byte("new file mode ")):
-			f.IsNew = true
+			if compatFile != nil {
+				compatFile.IsNew = true
+			}
 		case bytes.HasPrefix(line, []byte("deleted file mode ")):
-			f.IsDelete = true
+			if compatFile != nil {
+				compatFile.IsDelete = true
+			} else {
+				f.isDelete = true
+			}
 		case bytes.HasPrefix(line, []byte("rename to ")):
-			f.IsRename = true
+			if compatFile != nil {
+				compatFile.IsRename = true
+			}
 			newName = unquoteName(string(line[len("rename to "):]))
 		case bytes.HasPrefix(line, []byte("rename new ")):
-			f.IsRename = true
+			if compatFile != nil {
+				compatFile.IsRename = true
+			}
 			newName = unquoteName(string(line[len("rename new "):]))
 		case bytes.HasPrefix(line, []byte("copy to ")):
-			f.IsCopy = true
+			if compatFile != nil {
+				compatFile.IsCopy = true
+			}
 			newName = unquoteName(string(line[len("copy to "):]))
 		case bytes.HasPrefix(line, []byte("rename from ")), bytes.HasPrefix(line, []byte("rename old ")),
 			bytes.HasPrefix(line, []byte("copy from ")),
@@ -464,49 +647,58 @@ func (p *fastLogParser) parseFileDiff() {
 		case bytes.HasPrefix(line, []byte("Binary files ")) && bytes.HasSuffix(line, []byte("differ")),
 			bytes.Equal(line, []byte("GIT binary patch")), bytes.Equal(line, []byte("Binary files differ")),
 			bytes.Equal(line, []byte("Files differ")):
-			f.IsBinary = true
+			if compatFile != nil {
+				compatFile.IsBinary = true
+			} else {
+				f.isBinary = true
+			}
 			p.readLine()
-			p.finishFile(f, newName, defaultName)
+			err := p.finishFile(f, compatFile, newName, defaultName)
 			p.skipBinaryData()
-			return
+			return err
 		default:
 			// Unknown line ends the header (empty diff: mode-only change,
 			// or the stream moved on to the next commit/diff).
-			p.finishFile(f, newName, defaultName)
-			return
+			return p.finishFile(f, compatFile, newName, defaultName)
 		}
 		p.readLine()
 	}
-	p.finishFile(f, newName, defaultName)
-	return
+	return p.finishFile(f, compatFile, newName, defaultName)
 
 hunks:
 	for p.line != nil && bytes.HasPrefix(p.line, []byte("@@ -")) {
-		frag := p.parseHunk()
-		if frag == nil {
+		if !p.parseHunk(&f, compatFile) {
 			break
 		}
-		f.TextFragments = append(f.TextFragments, frag)
 	}
-	p.finishFile(f, newName, defaultName)
+	return p.finishFile(f, compatFile, newName, defaultName)
 }
 
 // finishFile resolves the file name exactly as betterleaks consumes it and
 // emits the file.
-func (p *fastLogParser) finishFile(f *gitdiff.File, newName, defaultName string) {
+func (p *fastLogParser) finishFile(f fastGitFile, compatFile *gitdiff.File, newName, defaultName string) error {
+	var resolvedName string
 	switch {
 	case newName != "":
-		f.NewName = newName
+		resolvedName = newName
 	case defaultName != "":
-		f.NewName = defaultName
+		resolvedName = defaultName
 	}
-	if f.IsDelete {
+	if compatFile != nil {
+		compatFile.NewName = resolvedName
+		if compatFile.IsDelete {
+			compatFile.NewName = ""
+		}
+		return p.emitCompat(compatFile)
+	}
+	f.newName = resolvedName
+	if f.isDelete {
 		// gitdiff sets NewName="" for deletions (parseGitHeaderNewName is
 		// gated by !IsDelete, and "+++ /dev/null" never assigns). The
 		// consumer only checks IsDelete, but keep the shape identical.
-		f.NewName = ""
+		f.newName = ""
 	}
-	p.out <- f
+	return p.emit(f)
 }
 
 // skipBinaryData consumes "GIT binary patch" literal sections if present.
@@ -522,33 +714,25 @@ func (p *fastLogParser) skipBinaryData() {
 	}
 }
 
-// parseHunk parses one @@ header and its body, returning a TextFragment
-// with NewPosition set and a single OpAdd line holding the pre-joined added
-// bytes (exactly what TextFragment.Raw(gitdiff.OpAdd) returns).
-func (p *fastLogParser) parseHunk() *gitdiff.TextFragment {
+// parseHunk parses one @@ header and its body, appending directly to the
+// selected native or compatibility file representation.
+func (p *fastLogParser) parseHunk(f *fastGitFile, compatFile *gitdiff.File) bool {
 	header := chompNL(p.line)
 	// @@ -old[,n] +new[,m] @@ [comment]
 	rest := header[len("@@ -"):]
 	end := bytes.Index(rest, []byte(" @@"))
 	if end < 0 {
 		p.readLine()
-		return nil
+		return false
 	}
 	ranges := rest[:end]
 	sp := bytes.Index(ranges, []byte(" +"))
 	if sp < 0 {
 		p.readLine()
-		return nil
+		return false
 	}
 	oldStart, oldCount := parseRangeBytes(ranges[:sp])
 	newStart, newCount := parseRangeBytes(ranges[sp+2:])
-
-	frag := &gitdiff.TextFragment{
-		OldPosition: oldStart,
-		OldLines:    oldCount,
-		NewPosition: newStart,
-		NewLines:    newCount,
-	}
 
 	var added strings.Builder
 	oldLeft, newLeft := oldCount, newCount
@@ -612,11 +796,30 @@ func (p *fastLogParser) parseHunk() *gitdiff.TextFragment {
 		flushPendingAddNewline()
 	}
 
-	frag.LinesAdded = newCount // informational; consumer doesn't read it
-	if added.Len() > 0 || newCount > 0 {
-		frag.Lines = []gitdiff.Line{{Op: gitdiff.OpAdd, Line: added.String()}}
+	hasLines := added.Len() > 0 || newCount > 0
+	var raw string
+	if hasLines {
+		raw = added.String()
 	}
-	return frag
+	if compatFile != nil {
+		fragment := &gitdiff.TextFragment{
+			OldPosition: oldStart,
+			OldLines:    oldCount,
+			NewPosition: newStart,
+			NewLines:    newCount,
+			LinesAdded:  newCount,
+		}
+		if hasLines {
+			fragment.Lines = []gitdiff.Line{{Op: gitdiff.OpAdd, Line: raw}}
+		}
+		compatFile.TextFragments = append(compatFile.TextFragments, fragment)
+	} else {
+		f.fragments = append(f.fragments, fastGitFragment{
+			newPosition: newStart,
+			raw:         raw,
+		})
+	}
+	return true
 }
 
 // parseRangeBytes parses "start[,count]"; count defaults to 1.

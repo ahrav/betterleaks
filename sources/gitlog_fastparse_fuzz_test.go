@@ -30,17 +30,16 @@ func drainFast(t *testing.T, data []byte, timeout time.Duration) []consumedView 
 	t.Helper()
 	done := make(chan []consumedView, 1)
 	go func() {
-		ch, err := fastParseGitLog(bytes.NewReader(data))
+		var views []consumedView
+		err := parseFastGitLog(bytes.NewReader(data), func(f fastGitFile) error {
+			if !f.isDelete {
+				views = append(views, viewOfFast(f))
+			}
+			return nil
+		})
 		if err != nil {
 			done <- nil
 			return
-		}
-		var views []consumedView
-		for f := range ch {
-			if f.IsDelete {
-				continue
-			}
-			views = append(views, viewOf(f))
 		}
 		done <- views
 	}()

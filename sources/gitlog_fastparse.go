@@ -3,6 +3,7 @@ package sources
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -110,6 +111,8 @@ func chompNL(line []byte) []byte {
 	return line
 }
 
+var errCommitHeaderTooLong = errors.New("commit header line exceeds gitdiff scanner token limit")
+
 // parseCommitHeader consumes a `commit <sha>` block: header fields, blank
 // line, then the 4-space-indented message until the next diff/commit/EOF.
 // Field semantics mirror gitdiff's parseHeaderPretty + scanMessageTitle/Body
@@ -143,6 +146,9 @@ func (p *fastLogParser) parseCommitHeader() {
 	var hdrErr error
 	for p.line != nil {
 		line := chompNL(p.line)
+		if len(line) > bufio.MaxScanTokenSize {
+			hdrErr = errCommitHeaderTooLong
+		}
 		if len(bytes.TrimSpace(line)) == 0 {
 			break
 		}
@@ -201,6 +207,7 @@ func (p *fastLogParser) parseCommitHeader() {
 	indent := ""
 	indentSet := false
 	inTitle := true
+	skipBody := false
 	empty := 0
 	for p.line != nil {
 		p.readLine()
@@ -208,27 +215,31 @@ func (p *fastLogParser) parseCommitHeader() {
 			break
 		}
 		line := chompNL(p.line)
+		if len(line) > bufio.MaxScanTokenSize {
+			hdrErr = errCommitHeaderTooLong
+		}
 		trimmed := bytes.TrimSpace(line)
 
 		if inTitle {
 			if len(trimmed) == 0 {
-				if title.Len() > 0 {
-					inTitle = false
-				}
+				skipBody = title.Len() == 0
+				inTitle = false
 				continue
 			}
 			if !indentSet {
-				ws := 0
-				for ws < len(line) && (line[ws] == ' ' || line[ws] == '\t') {
-					ws++
+				lineStr := string(line)
+				if start := strings.IndexFunc(lineStr, func(c rune) bool { return !unicode.IsSpace(c) }); start > 0 {
+					indent = lineStr[:start]
 				}
-				indent = string(line[:ws])
 				indentSet = true
 			}
 			if title.Len() > 0 {
 				title.WriteByte(' ')
 			}
 			title.Write(trimmed)
+			continue
+		}
+		if skipBody {
 			continue
 		}
 
@@ -438,16 +449,21 @@ func (p *fastLogParser) parseFileDiff() {
 		case bytes.HasPrefix(line, []byte("rename to ")):
 			f.IsRename = true
 			newName = unquoteName(string(line[len("rename to "):]))
+		case bytes.HasPrefix(line, []byte("rename new ")):
+			f.IsRename = true
+			newName = unquoteName(string(line[len("rename new "):]))
 		case bytes.HasPrefix(line, []byte("copy to ")):
 			f.IsCopy = true
 			newName = unquoteName(string(line[len("copy to "):]))
-		case bytes.HasPrefix(line, []byte("rename from ")), bytes.HasPrefix(line, []byte("copy from ")),
+		case bytes.HasPrefix(line, []byte("rename from ")), bytes.HasPrefix(line, []byte("rename old ")),
+			bytes.HasPrefix(line, []byte("copy from ")),
 			bytes.HasPrefix(line, []byte("old mode ")), bytes.HasPrefix(line, []byte("new mode ")),
 			bytes.HasPrefix(line, []byte("similarity index ")), bytes.HasPrefix(line, []byte("dissimilarity index ")),
 			bytes.HasPrefix(line, []byte("index ")):
 			// consumed; carries no data betterleaks uses
 		case bytes.HasPrefix(line, []byte("Binary files ")) && bytes.HasSuffix(line, []byte("differ")),
-			bytes.Equal(line, []byte("GIT binary patch")), bytes.Equal(line, []byte("Binary files differ")):
+			bytes.Equal(line, []byte("GIT binary patch")), bytes.Equal(line, []byte("Binary files differ")),
+			bytes.Equal(line, []byte("Files differ")):
 			f.IsBinary = true
 			p.readLine()
 			p.finishFile(f, newName, defaultName)

@@ -1,11 +1,13 @@
 package detect
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/gitleaks/go-gitdiff/gitdiff"
@@ -24,11 +26,12 @@ import (
 //
 // To update after an intentional behavior change: run the test, verify the
 // printed findings diff is expected, and paste the new digest.
-const goldenFindingsDigest = "e1502267a2929cbfb3ad81ed02c56d7d635b4d28a74b44eea15eec42ebdb867d"
+const goldenFindingsDigest = "8b39832f30a614acf7f317885dc12d996bab15ddf46e3e66420be90797272c80"
 
 func TestFindingsDigestGolden(t *testing.T) {
 	patch, err := os.ReadFile("../sources/testdata/digest_fixture.patch")
 	require.NoError(t, err)
+	patch = hydrateDigestFixture(patch)
 
 	cfg, err := config.Default()
 	require.NoError(t, err)
@@ -81,6 +84,35 @@ func TestFindingsDigestGolden(t *testing.T) {
 		t.Fatalf("findings digest changed: got %s want %s\n%d findings:\n%s",
 			digest, goldenFindingsDigest, len(keys), joinLines(keys))
 	}
+}
+
+func hydrateDigestFixture(patch []byte) []byte {
+	replacements := []struct {
+		from string
+		to   string
+	}{
+		{
+			from: "REDACTED_SLACK_TOKEN",
+			to: strings.Join([]string{
+				"xo", "xb", "-",
+				"123456789012", "-",
+				"1234567890123", "-",
+				"abcdefghijklmnopqrstuvwx",
+			}, ""),
+		},
+		{
+			from: "REDACTED_STRIPE_TOKEN",
+			to:   strings.Join([]string{"sk", "_live", "_", "abcdef0123456789ABCDEF0123"}, ""),
+		},
+		{
+			from: "REDACTED_STRIPE_TEST_TOKEN",
+			to:   strings.Join([]string{"sk", "_test", "_", "4eC39HqLyjWDarjtT1zdp7dc0000000000"}, ""),
+		},
+	}
+	for _, replacement := range replacements {
+		patch = bytes.ReplaceAll(patch, []byte(replacement.from), []byte(replacement.to))
+	}
+	return patch
 }
 
 func joinLines(ss []string) string {

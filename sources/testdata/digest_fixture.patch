@@ -2107,7 +2107,7 @@ index 0000000..1111111
 +github_pat = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 +slack_token = "REDACTED_SLACK_TOKEN"
 +generic_api_key = "REDACTED_STRIPE_TOKEN"
-+stripe_key = "REDACTED_STRIPE_TOKEN"
++stripe_key = "REDACTED_STRIPE_TEST_TOKEN"
 +private_key_pw = "hunter2hunter2"
 diff --git a/deploy/notes.md b/deploy/notes.md
 index 0000000..2222222 100644

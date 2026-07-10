@@ -1,0 +1,21 @@
+[package]
+name = "betterleaks-gix-helper"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+git2 = "=0.21.0"
+gix = { version = "=0.85.0", default-features = false, features = ["max-performance-safe", "blob-diff", "mailmap", "sha1", "sha256"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

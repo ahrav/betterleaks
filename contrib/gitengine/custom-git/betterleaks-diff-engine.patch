@@ -1,0 +1,1619 @@
+diff --git a/Documentation/git-betterleaks--diff-engine.adoc b/Documentation/git-betterleaks--diff-engine.adoc
+new file mode 100644
+index 000000000..b10a46cf3
+--- /dev/null
++++ b/Documentation/git-betterleaks--diff-engine.adoc
+@@ -0,0 +1,34 @@
++git-betterleaks--diff-engine(1)
++=================================
++
++NAME
++----
++git-betterleaks--diff-engine - experimental typed history-diff helper
++
++SYNOPSIS
++--------
++[verse]
++'git betterleaks--diff-engine' --protocol=1
++
++DESCRIPTION
++-----------
++This experimental plumbing command serves sequential, length-prefixed binary
++requests on standard input and writes typed commit, file, and added-hunk
++records on standard output. It is an internal Betterleaks performance
++experiment, not a stable Git interface.
++
++Protocol version 1 uses big-endian integers, raw SHA-1 or SHA-256 object IDs,
++and a 16 MiB frame bound. Requests use `BGIN` frames and the process is closed
++with `QUIT`. Responses are nested `CMIT`, `FBEG`, hunk, and matching end
++frames, terminated by `BEND`. Large hunks use `HBGN`, `HADD`, and `HEND`.
++`ERRO` is terminal. Before `HELO`, an unsupported repository capability is
++reported as error kind 5 with batch ID zero, then the helper exits cleanly.
++
++The diff profile is fixed to root commits, no merge diffs, `-U0`, `-M50%`,
++the A/M/R production filter, Myers with the indent heuristic, textconv, and no
++external diff. The command disables replace objects. Protocol stdout must not
++be used for diagnostics.
++
++GIT
++---
++Part of the linkgit:git[1] suite
+diff --git a/Documentation/meson.build b/Documentation/meson.build
+index 4404c623f..942c1360e 100644
+--- a/Documentation/meson.build
++++ b/Documentation/meson.build
+@@ -7,6 +7,7 @@ manpages = {
+   'git-archimport.adoc' : 1,
+   'git-archive.adoc' : 1,
+   'git-backfill.adoc' : 1,
++  'git-betterleaks--diff-engine.adoc' : 1,
+   'git-bisect.adoc' : 1,
+   'git-blame.adoc' : 1,
+   'git-branch.adoc' : 1,
+diff --git a/Makefile b/Makefile
+index e11340c1a..624727528 100644
+--- a/Makefile
++++ b/Makefile
+@@ -969,6 +969,7 @@ LIB_OBJS += archive-zip.o
+ LIB_OBJS += archive.o
+ LIB_OBJS += attr.o
+ LIB_OBJS += base85.o
++LIB_OBJS += betterleaks-engine-protocol.o
+ LIB_OBJS += bisect.o
+ LIB_OBJS += blame.o
+ LIB_OBJS += blob.o
+@@ -1214,6 +1215,7 @@ BUILTIN_OBJS += builtin/annotate.o
+ BUILTIN_OBJS += builtin/apply.o
+ BUILTIN_OBJS += builtin/archive.o
+ BUILTIN_OBJS += builtin/backfill.o
++BUILTIN_OBJS += builtin/betterleaks--diff-engine.o
+ BUILTIN_OBJS += builtin/bisect.o
+ BUILTIN_OBJS += builtin/blame.o
+ BUILTIN_OBJS += builtin/branch.o
+diff --git a/betterleaks-engine-protocol.c b/betterleaks-engine-protocol.c
+new file mode 100644
+index 000000000..f1e8ecea4
+--- /dev/null
++++ b/betterleaks-engine-protocol.c
+@@ -0,0 +1,395 @@
++#include "git-compat-util.h"
++#include "betterleaks-engine-protocol.h"
++#include "diffcore.h"
++#include "repository.h"
++
++static void bl_put_be16(unsigned char *p, uint16_t v)
++{
++	p[0] = v >> 8;
++	p[1] = v;
++}
++
++static uint32_t bl_get_be32(const unsigned char *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	       ((uint32_t)p[2] << 8) | p[3];
++}
++
++static uint64_t bl_get_be64(const unsigned char *p)
++{
++	return ((uint64_t)bl_get_be32(p) << 32) | bl_get_be32(p + 4);
++}
++
++static void payload_u32(struct strbuf *sb, uint32_t v)
++{
++	unsigned char b[4];
++	put_be32(b, v);
++	strbuf_add(sb, b, sizeof(b));
++}
++
++static void payload_u64(struct strbuf *sb, uint64_t v)
++{
++	unsigned char b[8];
++	put_be64(b, v);
++	strbuf_add(sb, b, sizeof(b));
++}
++
++static void payload_bytes(struct strbuf *sb, const void *data, size_t len)
++{
++	if (len > UINT32_MAX)
++		die("betterleaks protocol field is too large");
++	payload_u32(sb, len);
++	strbuf_add(sb, data, len);
++}
++
++static void write_frame(struct betterleaks_protocol *p, const char tag[4],
++			uint64_t batch_id, const void *payload, size_t payload_len)
++{
++	unsigned char header[16];
++	uint64_t frame_len = 12 + payload_len;
++
++	if (frame_len > BETTERLEAKS_MAX_FRAME)
++		die("betterleaks protocol frame is too large");
++	put_be32(header, frame_len);
++	memcpy(header + 4, tag, 4);
++	put_be64(header + 8, batch_id);
++	if (fwrite(header, 1, sizeof(header), p->out) != sizeof(header) ||
++	    (payload_len && fwrite(payload, 1, payload_len, p->out) != payload_len))
++		die_errno("betterleaks protocol write failed");
++}
++
++static void flush_output(struct betterleaks_protocol *p)
++{
++	if (fflush(p->out))
++		die_errno("betterleaks protocol flush failed");
++}
++
++int betterleaks_read_frame(struct betterleaks_protocol *p,
++			   struct betterleaks_frame *frame)
++{
++	unsigned char prefix[4], header[12];
++	uint32_t len;
++
++	memset(frame, 0, sizeof(*frame));
++	strbuf_init(&frame->payload, 0);
++	if (fread(prefix, 1, sizeof(prefix), p->in) != sizeof(prefix)) {
++		if (feof(p->in))
++			return 0;
++		die_errno("betterleaks protocol read failed");
++	}
++	len = bl_get_be32(prefix);
++	if (len < 12 || len > BETTERLEAKS_MAX_FRAME)
++		return -1;
++	if (fread(header, 1, sizeof(header), p->in) != sizeof(header))
++		return -1;
++	memcpy(frame->tag, header, 4);
++	frame->batch_id = bl_get_be64(header + 4);
++	if (len > 12) {
++		strbuf_grow(&frame->payload, len - 12);
++		if (fread(frame->payload.buf, 1, len - 12, p->in) != len - 12)
++			return -1;
++		frame->payload.len = len - 12;
++		frame->payload.buf[frame->payload.len] = '\0';
++	}
++	return 1;
++}
++
++void betterleaks_frame_release(struct betterleaks_frame *frame)
++{
++	strbuf_release(&frame->payload);
++}
++
++void betterleaks_write_hello(struct betterleaks_protocol *p)
++{
++	unsigned char payload[6];
++	bl_put_be16(payload, BETTERLEAKS_PROTOCOL_VERSION);
++	bl_put_be16(payload + 2, p->oid_len);
++	payload[4] = payload[5] = 0;
++	write_frame(p, "HELO", 0, payload, sizeof(payload));
++	flush_output(p);
++}
++
++void betterleaks_write_batch_begin(struct betterleaks_protocol *p)
++{
++	write_frame(p, "BGIN", p->batch_id, NULL, 0);
++}
++
++void betterleaks_write_commit(struct betterleaks_protocol *p,
++			      const struct object_id *oid,
++			      const struct strbuf *message,
++			      const struct strbuf *author_name,
++			      const struct strbuf *author_email,
++			      int64_t author_time, int32_t author_tz,
++			      int has_author, int has_author_time)
++{
++	struct strbuf payload = STRBUF_INIT;
++	payload_bytes(&payload, oid->hash, p->oid_len);
++	payload_bytes(&payload, message->buf, message->len);
++	payload_bytes(&payload, author_name->buf, author_name->len);
++	payload_bytes(&payload, author_email->buf, author_email->len);
++	payload_u64(&payload, author_time);
++	payload_u32(&payload, author_tz);
++	strbuf_addch(&payload, !!has_author);
++	strbuf_addch(&payload, !!has_author_time);
++	write_frame(p, "CMIT", p->batch_id, payload.buf, payload.len);
++	strbuf_release(&payload);
++	p->commits++;
++}
++
++void betterleaks_write_commit_end(struct betterleaks_protocol *p)
++{
++	write_frame(p, "CEND", p->batch_id, NULL, 0);
++}
++
++void betterleaks_write_batch_end(struct betterleaks_protocol *p)
++{
++	unsigned char payload[25];
++	payload[0] = 0;
++	put_be64(payload + 1, p->commits);
++	put_be64(payload + 9, p->files);
++	put_be64(payload + 17, p->hunks);
++	write_frame(p, "BEND", p->batch_id, payload, sizeof(payload));
++	flush_output(p);
++}
++
++void betterleaks_write_error(struct betterleaks_protocol *p, uint64_t batch_id,
++			     unsigned char kind, const char *op,
++			     const char *message)
++{
++	struct strbuf payload = STRBUF_INIT;
++	strbuf_addch(&payload, kind);
++	payload_bytes(&payload, op, strlen(op));
++	payload_bytes(&payload, message, strlen(message));
++	write_frame(p, "ERRO", batch_id, payload.buf, payload.len);
++	strbuf_release(&payload);
++	flush_output(p);
++}
++
++static void emit_file_begin(struct betterleaks_protocol *p)
++{
++	struct strbuf payload = STRBUF_INIT;
++	struct object_id old_oid = { .algo = p->commit_oid.algo };
++	struct object_id new_oid = { .algo = p->commit_oid.algo };
++	const char *old_path, *new_path;
++
++	if (p->file_emitted)
++		return;
++	old_path = p->one && p->one->path ? p->one->path : "";
++	new_path = p->two && p->two->path ? p->two->path : "";
++	if (p->one)
++		oidcpy(&old_oid, &p->one->oid);
++	if (p->two)
++		oidcpy(&new_oid, &p->two->oid);
++	payload_bytes(&payload, p->commit_oid.hash, p->oid_len);
++	strbuf_addch(&payload, p->pair->status);
++	payload_u32(&payload, p->one ? p->one->mode : 0);
++	payload_u32(&payload, p->two ? p->two->mode : 0);
++	payload_bytes(&payload, old_oid.hash, p->oid_len);
++	payload_bytes(&payload, new_oid.hash, p->oid_len);
++	payload_bytes(&payload, old_path, strlen(old_path));
++	payload_bytes(&payload, new_path, strlen(new_path));
++	strbuf_addch(&payload, !!p->file_binary);
++	write_frame(p, "FBEG", p->batch_id, payload.buf, payload.len);
++	strbuf_release(&payload);
++	p->file_emitted = 1;
++	p->files++;
++}
++
++static void write_hunk_begin(struct betterleaks_protocol *p)
++{
++	struct strbuf payload = STRBUF_INIT;
++	const char *path = p->two && p->two->path ? p->two->path : "";
++	payload_bytes(&payload, p->commit_oid.hash, p->oid_len);
++	payload_bytes(&payload, path, strlen(path));
++	payload_u64(&payload, p->hunk_position);
++	write_frame(p, "HBGN", p->batch_id, payload.buf, payload.len);
++	strbuf_release(&payload);
++}
++
++static void write_hadd(struct betterleaks_protocol *p, const char *data, size_t len)
++{
++	size_t max = BETTERLEAKS_MAX_FRAME - 12;
++	while (len) {
++		size_t n = len > max ? max : len;
++		write_frame(p, "HADD", p->batch_id, data, n);
++		data += n;
++		len -= n;
++	}
++}
++
++static size_t hunk_metadata_size(struct betterleaks_protocol *p)
++{
++	const char *path = p->two && p->two->path ? p->two->path : "";
++	return 4 + p->oid_len + 4 + strlen(path) + 8 + 4 + 1;
++}
++
++static void hunk_data(struct betterleaks_protocol *p, const char *data, size_t len)
++{
++	if (!len)
++		return;
++	if (!p->hunk_continued &&
++	    p->hunk.len + len + hunk_metadata_size(p) <= BETTERLEAKS_MAX_FRAME - 12) {
++		strbuf_add(&p->hunk, data, len);
++		return;
++	}
++	if (!p->hunk_continued) {
++		write_hunk_begin(p);
++		write_hadd(p, p->hunk.buf, p->hunk.len);
++		strbuf_reset(&p->hunk);
++		p->hunk_continued = 1;
++	}
++	write_hadd(p, data, len);
++}
++
++static void flush_pending(struct betterleaks_protocol *p)
++{
++	if (p->pending_valid) {
++		hunk_data(p, &p->pending, 1);
++		p->pending_valid = 0;
++	}
++}
++
++static void finish_hunk(struct betterleaks_protocol *p, int missing)
++{
++	struct strbuf payload = STRBUF_INIT;
++	const char *path;
++	if (!p->hunk_open)
++		return;
++	flush_pending(p);
++	path = p->two && p->two->path ? p->two->path : "";
++	if (p->hunk_continued) {
++		unsigned char value = !!missing;
++		write_frame(p, "HEND", p->batch_id, &value, 1);
++	} else {
++		payload_bytes(&payload, p->commit_oid.hash, p->oid_len);
++		payload_bytes(&payload, path, strlen(path));
++		payload_u64(&payload, p->hunk_position);
++		payload_bytes(&payload, p->hunk.buf, p->hunk.len);
++		strbuf_addch(&payload, !!missing);
++		write_frame(p, "HUNK", p->batch_id, payload.buf, payload.len);
++	}
++	strbuf_release(&payload);
++	strbuf_reset(&p->hunk);
++	p->hunk_open = p->hunk_continued = p->pending_valid = 0;
++	p->hunks++;
++}
++
++static void sink_file_begin(void *data, struct diff_filepair *pair,
++			    struct diff_filespec *one,
++			    struct diff_filespec *two)
++{
++	struct betterleaks_protocol *p = data;
++	if (p->file_open)
++		BUG("betterleaks native file opened twice");
++	p->pair = pair;
++	p->one = one;
++	p->two = two;
++	p->file_open = 1;
++	p->file_emitted = p->file_binary = 0;
++}
++
++static void sink_file_binary(void *data)
++{
++	struct betterleaks_protocol *p = data;
++	if (!p->file_open)
++		BUG("betterleaks binary marker outside file");
++	p->file_binary = 1;
++}
++
++static void sink_hunk_begin(void *data, unsigned long new_line)
++{
++	struct betterleaks_protocol *p = data;
++	if (!p->file_open)
++		BUG("betterleaks hunk outside file");
++	finish_hunk(p, 0);
++	emit_file_begin(p);
++	p->hunk_open = 1;
++	p->hunk_position = new_line;
++	p->last_line = DIFF_NATIVE_LINE_CONTEXT;
++}
++
++static void sink_line(void *data, enum diff_native_line kind,
++		      const char *line, size_t len)
++{
++	struct betterleaks_protocol *p = data;
++	if (!p->hunk_open && kind != DIFF_NATIVE_LINE_NO_LF_EOF)
++		return;
++	if (kind == DIFF_NATIVE_LINE_INCOMPLETE) {
++		if (p->last_line == DIFF_NATIVE_LINE_PLUS) {
++			if (p->pending_valid && p->pending == '\n')
++				p->pending_valid = 0;
++			else
++				flush_pending(p);
++			finish_hunk(p, 1);
++		}
++		return;
++	}
++	if (kind == DIFF_NATIVE_LINE_NO_LF_EOF) {
++		if (p->last_line == DIFF_NATIVE_LINE_PLUS) {
++			flush_pending(p);
++			finish_hunk(p, 1);
++		}
++		return;
++	}
++	flush_pending(p);
++	if (kind == DIFF_NATIVE_LINE_PLUS && len) {
++		if (len > 1)
++			hunk_data(p, line, len - 1);
++		p->pending = line[len - 1];
++		p->pending_valid = 1;
++	}
++	p->last_line = kind;
++}
++
++static void sink_file_end(void *data)
++{
++	struct betterleaks_protocol *p = data;
++	if (!p->file_open)
++		BUG("betterleaks native file ended while closed");
++	finish_hunk(p, 0);
++	emit_file_begin(p);
++	write_frame(p, "FEND", p->batch_id, NULL, 0);
++	p->file_open = p->file_emitted = 0;
++	p->pair = NULL;
++	p->one = p->two = NULL;
++}
++
++void betterleaks_protocol_init(struct betterleaks_protocol *p, FILE *in,
++			       FILE *out, size_t oid_len)
++{
++	memset(p, 0, sizeof(*p));
++	p->in = in;
++	p->out = out;
++	p->oid_len = oid_len;
++	strbuf_init(&p->hunk, 0);
++	p->sink.data = p;
++	p->sink.file_begin = sink_file_begin;
++	p->sink.file_binary = sink_file_binary;
++	p->sink.hunk_begin = sink_hunk_begin;
++	p->sink.line = sink_line;
++	p->sink.file_end = sink_file_end;
++}
++
++void betterleaks_protocol_release(struct betterleaks_protocol *p)
++{
++	strbuf_release(&p->hunk);
++}
++
++void betterleaks_protocol_set_batch(struct betterleaks_protocol *p,
++				    uint64_t batch_id)
++{
++	p->batch_id = batch_id;
++	p->commits = p->files = p->hunks = 0;
++}
++
++void betterleaks_protocol_set_commit(struct betterleaks_protocol *p,
++				     const struct object_id *oid)
++{
++	oidcpy(&p->commit_oid, oid);
++}
++
++void betterleaks_protocol_assert_closed(struct betterleaks_protocol *p)
++{
++	if (p->file_open || p->hunk_open || p->pending_valid)
++		BUG("betterleaks protocol record left open");
++}
+diff --git a/betterleaks-engine-protocol.h b/betterleaks-engine-protocol.h
+new file mode 100644
+index 000000000..0338404e6
+--- /dev/null
++++ b/betterleaks-engine-protocol.h
+@@ -0,0 +1,61 @@
++#ifndef BETTERLEAKS_ENGINE_PROTOCOL_H
++#define BETTERLEAKS_ENGINE_PROTOCOL_H
++
++#include "diff.h"
++#include "hash.h"
++#include "strbuf.h"
++
++#define BETTERLEAKS_PROTOCOL_VERSION 1
++#define BETTERLEAKS_MAX_FRAME (16U << 20)
++
++struct betterleaks_frame {
++	char tag[4];
++	uint64_t batch_id;
++	struct strbuf payload;
++};
++
++struct betterleaks_protocol {
++	FILE *in;
++	FILE *out;
++	size_t oid_len;
++	uint64_t batch_id, commits, files, hunks;
++	struct object_id commit_oid;
++	struct diff_native_sink sink;
++	struct diff_filepair *pair;
++	struct diff_filespec *one, *two;
++	int file_open, file_emitted, file_binary;
++	int hunk_open, hunk_continued;
++	uint64_t hunk_position;
++	struct strbuf hunk;
++	int pending_valid;
++	char pending;
++	enum diff_native_line last_line;
++};
++
++void betterleaks_protocol_init(struct betterleaks_protocol *p, FILE *in,
++			       FILE *out, size_t oid_len);
++void betterleaks_protocol_release(struct betterleaks_protocol *p);
++int betterleaks_read_frame(struct betterleaks_protocol *p,
++			   struct betterleaks_frame *frame);
++void betterleaks_frame_release(struct betterleaks_frame *frame);
++void betterleaks_write_hello(struct betterleaks_protocol *p);
++void betterleaks_write_batch_begin(struct betterleaks_protocol *p);
++void betterleaks_write_commit(struct betterleaks_protocol *p,
++			      const struct object_id *oid,
++			      const struct strbuf *message,
++			      const struct strbuf *author_name,
++			      const struct strbuf *author_email,
++			      int64_t author_time, int32_t author_tz,
++			      int has_author, int has_author_time);
++void betterleaks_write_commit_end(struct betterleaks_protocol *p);
++void betterleaks_write_batch_end(struct betterleaks_protocol *p);
++void betterleaks_write_error(struct betterleaks_protocol *p, uint64_t batch_id,
++			     unsigned char kind, const char *op,
++			     const char *message);
++void betterleaks_protocol_set_batch(struct betterleaks_protocol *p,
++				    uint64_t batch_id);
++void betterleaks_protocol_set_commit(struct betterleaks_protocol *p,
++				     const struct object_id *oid);
++void betterleaks_protocol_assert_closed(struct betterleaks_protocol *p);
++
++#endif
+diff --git a/builtin.h b/builtin.h
+index bff13e306..99333dc37 100644
+--- a/builtin.h
++++ b/builtin.h
+@@ -121,6 +121,7 @@ int cmd_annotate(int argc, const char **argv, const char *prefix, struct reposit
+ int cmd_apply(int argc, const char **argv, const char *prefix, struct repository *repo);
+ int cmd_archive(int argc, const char **argv, const char *prefix, struct repository *repo);
+ int cmd_backfill(int argc, const char **argv, const char *prefix, struct repository *repo);
++int cmd_betterleaks__diff_engine(int argc, const char **argv, const char *prefix, struct repository *repo);
+ int cmd_bisect(int argc, const char **argv, const char *prefix, struct repository *repo);
+ int cmd_blame(int argc, const char **argv, const char *prefix, struct repository *repo);
+ int cmd_branch(int argc, const char **argv, const char *prefix, struct repository *repo);
+diff --git a/builtin/betterleaks--diff-engine.c b/builtin/betterleaks--diff-engine.c
+new file mode 100644
+index 000000000..aed62d86e
+--- /dev/null
++++ b/builtin/betterleaks--diff-engine.c
+@@ -0,0 +1,443 @@
++#include "builtin.h"
++#include "betterleaks-engine-protocol.h"
++#include "commit.h"
++#include "config.h"
++#include "diff.h"
++#include "diffcore.h"
++#include "ident.h"
++#include "hex.h"
++#include "log-tree.h"
++#include "mailmap.h"
++#include "parse-options.h"
++#include "pretty.h"
++#include "replace-object.h"
++#include "revision.h"
++
++static const char * const betterleaks_engine_usage[] = {
++	N_("git betterleaks--diff-engine --protocol=1"),
++	NULL
++};
++
++static uint32_t bl_get_be32(const unsigned char *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	       ((uint32_t)p[2] << 8) | p[3];
++}
++
++static int parse_request(struct repository *repo,
++			 struct betterleaks_frame *frame,
++			 struct object_id **oids_out, size_t *nr_out,
++			 struct strbuf *error)
++{
++	const unsigned char *data = (unsigned char *)frame->payload.buf;
++	size_t len = frame->payload.len, pos = 0;
++	struct object_id *oids = NULL;
++	uint32_t count;
++
++	if (len < 4) {
++		strbuf_addstr(error, "BGIN payload is truncated");
++		return -1;
++	}
++	count = bl_get_be32(data);
++	pos = 4;
++	if (count > (len - pos) / (4 + repo->hash_algo->rawsz)) {
++		strbuf_addstr(error, "BGIN commit count exceeds payload");
++		return -1;
++	}
++	CALLOC_ARRAY(oids, count);
++	for (uint32_t i = 0; i < count; i++) {
++		uint32_t oid_len;
++		if (len - pos < 4) {
++			strbuf_addstr(error, "BGIN object ID length is truncated");
++			goto fail;
++		}
++		oid_len = bl_get_be32(data + pos);
++		pos += 4;
++		if (oid_len != repo->hash_algo->rawsz || len - pos < oid_len) {
++			strbuf_addstr(error, "BGIN object ID has wrong width");
++			goto fail;
++		}
++		oidread(&oids[i], data + pos, repo->hash_algo);
++		pos += oid_len;
++		for (uint32_t j = 0; j < i; j++) {
++			if (oideq(&oids[i], &oids[j])) {
++				strbuf_addstr(error, "BGIN contains a duplicate object ID");
++				goto fail;
++			}
++		}
++	}
++	if (pos != len) {
++		strbuf_addstr(error, "BGIN has trailing payload bytes");
++		goto fail;
++	}
++	*oids_out = oids;
++	*nr_out = count;
++	return 0;
++
++fail:
++	free(oids);
++	return -1;
++}
++
++static size_t unicode_space_len(const char *p, const char *end)
++{
++	const unsigned char *s = (const unsigned char *)p;
++	size_t len = end - p;
++
++	if (!len)
++		return 0;
++	if (*s == ' ' || (*s >= '\t' && *s <= '\r'))
++		return 1;
++	if (len >= 2 && s[0] == 0xc2 && (s[1] == 0x85 || s[1] == 0xa0))
++		return 2;
++	if (len >= 3 && s[0] == 0xe1 && s[1] == 0x9a && s[2] == 0x80)
++		return 3;
++	if (len >= 3 && s[0] == 0xe2 && s[1] == 0x80 &&
++	    ((s[2] >= 0x80 && s[2] <= 0x8a) ||
++	     s[2] == 0xa8 || s[2] == 0xa9 || s[2] == 0xaf))
++		return 3;
++	if (len >= 3 && s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f)
++		return 3;
++	if (len >= 3 && s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80)
++		return 3;
++	return 0;
++}
++
++static const char *trim_unicode_left(const char *begin, const char *end)
++{
++	size_t len;
++
++	while ((len = unicode_space_len(begin, end)) != 0)
++		begin += len;
++	return begin;
++}
++
++static const char *trim_unicode_right(const char *begin, const char *end)
++{
++	const char *p = begin, *trimmed = begin;
++
++	while (p < end) {
++		size_t len = unicode_space_len(p, end);
++		if (len) {
++			p += len;
++		} else {
++			p++;
++			trimmed = p;
++		}
++	}
++	return trimmed;
++}
++
++static void normalize_medium_message(const struct strbuf *pretty,
++				     struct strbuf *message)
++{
++	const char *line, *end = pretty->buf + pretty->len;
++	const char *indent = NULL;
++	size_t indent_len = 0;
++	int in_title = 1, have_title = 0, have_body = 0;
++	int blank_body = 0, skip_body = 0;
++
++	line = strstr(pretty->buf, "\n\n");
++	if (!line)
++		return;
++	line += 2;
++	while (line < end) {
++		const char *eol = memchr(line, '\n', end - line);
++		const char *begin = line;
++		const char *finish = eol ? eol : end;
++		if (in_title) {
++			begin = trim_unicode_left(begin, finish);
++			finish = trim_unicode_right(begin, finish);
++			if (begin == finish) {
++				skip_body = !have_title;
++				in_title = 0;
++			} else {
++				if (!indent) {
++					indent = line;
++					indent_len = begin - line;
++				}
++				if (have_title)
++					strbuf_addch(message, ' ');
++				strbuf_add(message, begin, finish - begin);
++				have_title = 1;
++			}
++		} else if (!skip_body) {
++			finish = trim_unicode_right(begin, finish);
++			if (indent_len && (size_t)(finish - begin) >= indent_len &&
++			    !memcmp(begin, indent, indent_len))
++				begin += indent_len;
++			if (begin == finish) {
++				if (have_body)
++					blank_body = 1;
++			} else {
++				if (!have_body)
++					strbuf_addstr(message, "\n\n");
++				else {
++					strbuf_addch(message, '\n');
++					if (blank_body)
++						strbuf_addch(message, '\n');
++				}
++				strbuf_add(message, begin, finish - begin);
++				have_body = 1;
++				blank_body = 0;
++			}
++		}
++		line = eol ? eol + 1 : end;
++	}
++}
++
++static int parse_tz(const struct ident_split *ident, int32_t *offset)
++{
++	const char *tz = ident->tz_begin;
++	int sign, hours, minutes;
++	if (!tz || ident->tz_end - tz != 5)
++		return -1;
++	sign = *tz++ == '-' ? -1 : 1;
++	if (!isdigit(tz[0]) || !isdigit(tz[1]) ||
++	    !isdigit(tz[2]) || !isdigit(tz[3]))
++		return -1;
++	hours = (tz[0] - '0') * 10 + tz[1] - '0';
++	minutes = (tz[2] - '0') * 10 + tz[3] - '0';
++	if (hours > 23 || minutes > 59)
++		return -1;
++	*offset = sign * (hours * 60 + minutes);
++	return 0;
++}
++
++static void write_commit_metadata(struct repository *repo,
++				  struct rev_info *rev,
++				  struct betterleaks_protocol *protocol,
++				  struct commit *commit)
++{
++	struct pretty_print_context pp = { 0 };
++	struct strbuf pretty = STRBUF_INIT, block = STRBUF_INIT;
++	struct strbuf message = STRBUF_INIT, mapped = STRBUF_INIT;
++	struct strbuf name = STRBUF_INIT, email = STRBUF_INIT;
++	struct ident_split ident;
++	const char *buffer, *author;
++	size_t author_len;
++	int has_author = 0, has_time = 0;
++	int64_t timestamp = 0;
++	int32_t tz = 0;
++
++	pp.fmt = CMIT_FMT_MEDIUM;
++	pp.date_mode = rev->date_mode;
++	pp.date_mode_explicit = 1;
++	pp.mailmap = rev->mailmap;
++	pp.output_encoding = "UTF-8";
++	pp.rev = rev;
++	pp.expand_tabs_in_log = 8;
++	pretty_print_commit(&pp, commit, &pretty);
++	strbuf_addf(&block, "commit %s\n", oid_to_hex(&commit->object.oid));
++	strbuf_addbuf(&block, &pretty);
++	normalize_medium_message(&block, &message);
++
++	buffer = repo_get_commit_buffer(repo, commit, NULL);
++	author = find_commit_header(buffer, "author", &author_len);
++	if (author && !split_ident_line(&ident, author, author_len)) {
++		char *end;
++		has_author = 1;
++		repo_format_commit_message(repo, commit, "%aN%x00%aE", &mapped, &pp);
++		if (mapped.len) {
++			const char *nul = memchr(mapped.buf, '\0', mapped.len);
++			if (nul) {
++				strbuf_add(&name, mapped.buf, nul - mapped.buf);
++				strbuf_add(&email, nul + 1,
++					   mapped.buf + mapped.len - (nul + 1));
++			}
++		}
++		if (ident.date_begin && ident.date_end &&
++		    ident.tz_begin && ident.tz_end && !parse_tz(&ident, &tz)) {
++			timestamp = strtoll(ident.date_begin, &end, 10);
++			if (end == ident.date_end)
++				has_time = 1;
++		}
++	}
++	repo_unuse_commit_buffer(repo, commit, buffer);
++	betterleaks_write_commit(protocol, &commit->object.oid, &message,
++				   &name, &email, timestamp, tz,
++				   has_author, has_time);
++	strbuf_release(&pretty);
++	strbuf_release(&block);
++	strbuf_release(&message);
++	strbuf_release(&mapped);
++	strbuf_release(&name);
++	strbuf_release(&email);
++}
++
++static int setup_batch_revision(struct repository *repo, struct rev_info *rev,
++				struct diff_native_sink *sink,
++				struct string_list *mailmap)
++{
++	const char *argv[] = {
++		"betterleaks--diff-engine", "-p", "-U0", "--root",
++		"--no-diff-merges", "-M50%", "--full-index",
++		"--src-prefix=a/", "--dst-prefix=b/", "--no-color",
++		"--no-ext-diff", "--textconv", "--diff-algorithm=myers",
++		"--indent-heuristic", "--no-notes", "--no-show-signature",
++		"--diff-filter=tuxdb",
++	};
++	struct setup_revision_opt opt = { 0 };
++	int argc;
++
++	repo_init_revisions(repo, rev, NULL);
++	rev->abbrev = 0;
++	rev->diff = 1;
++	rev->disable_stdin = 1;
++	argc = setup_revisions(ARRAY_SIZE(argv), argv, rev, &opt);
++	if (argc != 1)
++		return error("betterleaks revision profile left %d arguments (%s)",
++			     argc, argc > 1 ? argv[1] : "none");
++	rev->no_commit_id = 1;
++	rev->mailmap = mailmap;
++	rev->diffopt.no_free = 1;
++	rev->diffopt.native_sink = sink;
++	rev->diffopt.file = xfopen("/dev/null", "w");
++	rev->diffopt.close_file = 1;
++	return 0;
++}
++
++static int process_batch(struct repository *repo,
++			 struct betterleaks_protocol *protocol,
++			 struct string_list *mailmap,
++			 struct betterleaks_frame *frame)
++{
++	struct object_id *oids = NULL;
++	struct commit **commits = NULL;
++	struct strbuf error = STRBUF_INIT;
++	size_t nr = 0;
++	struct rev_info rev;
++	int ret = -1;
++
++	if (!frame->batch_id) {
++		betterleaks_write_error(protocol, 0, 1, "BGIN",
++					 "batch ID must be nonzero");
++		goto out;
++	}
++	if (parse_request(repo, frame, &oids, &nr, &error)) {
++		betterleaks_write_error(protocol, frame->batch_id, 1, "BGIN",
++					 error.buf);
++		goto out;
++	}
++	CALLOC_ARRAY(commits, nr);
++	for (size_t i = 0; i < nr; i++) {
++		commits[i] = lookup_commit_object(repo, &oids[i]);
++		if (!commits[i] || repo_parse_commit(repo, commits[i])) {
++			strbuf_reset(&error);
++			strbuf_addf(&error, "object %s is not a readable commit",
++				    oid_to_hex(&oids[i]));
++			betterleaks_write_error(protocol, frame->batch_id, 2,
++						 "lookup commit", error.buf);
++			goto out;
++		}
++	}
++	if (setup_batch_revision(repo, &rev, &protocol->sink, mailmap)) {
++		betterleaks_write_error(protocol, frame->batch_id, 2,
++					 "revision setup", "profile setup failed");
++		goto out;
++	}
++	betterleaks_protocol_set_batch(protocol, frame->batch_id);
++	betterleaks_write_batch_begin(protocol);
++	for (size_t i = 0; i < nr; i++) {
++		struct commit_list *parents;
++		rev.diffopt.found_changes = 0;
++		rev.diffopt.flags.has_changes = 0;
++		rev.diffopt.flags.check_failed = 0;
++		rev.shown_dashes = 0;
++		betterleaks_protocol_set_commit(protocol, &oids[i]);
++		write_commit_metadata(repo, &rev, protocol, commits[i]);
++		log_tree_commit(&rev, commits[i]);
++		betterleaks_protocol_assert_closed(protocol);
++		if (!diff_queue_is_empty(&rev.diffopt))
++			BUG("betterleaks diff queue was not drained");
++		betterleaks_write_commit_end(protocol);
++		free_commit_buffer(repo->parsed_objects, commits[i]);
++		for (parents = commits[i]->parents; parents; parents = parents->next)
++			free_commit_buffer(repo->parsed_objects, parents->item);
++	}
++	rev.diffopt.native_sink = NULL;
++	rev.diffopt.no_free = 0;
++	rev.mailmap = NULL;
++	release_revisions(&rev);
++	betterleaks_write_batch_end(protocol);
++	ret = 0;
++
++out:
++	strbuf_release(&error);
++	free(commits);
++	free(oids);
++	return ret;
++}
++
++int cmd_betterleaks__diff_engine(int argc, const char **argv,
++				 const char *prefix,
++				 struct repository *repo)
++{
++	struct betterleaks_protocol protocol;
++	struct string_list mailmap = STRING_LIST_INIT_NODUP;
++	int protocol_version = 0;
++	struct option options[] = {
++		OPT_INTEGER(0, "protocol", &protocol_version,
++			    N_("binary protocol version")),
++		OPT_END()
++	};
++
++	BUG_ON_NON_EMPTY_PREFIX(prefix);
++	argc = parse_options(argc, argv, prefix, options,
++			     betterleaks_engine_usage, 0);
++	if (argc || protocol_version != BETTERLEAKS_PROTOCOL_VERSION)
++		usage_with_options(betterleaks_engine_usage, options);
++	repo_config(repo, git_diff_basic_config, NULL);
++	prepare_repo_settings(repo);
++	disable_replace_refs();
++	read_mailmap(&mailmap);
++	betterleaks_protocol_init(&protocol, stdin, stdout, repo->hash_algo->rawsz);
++	if (repo->hash_algo->rawsz != 20 && repo->hash_algo->rawsz != 32) {
++		betterleaks_write_error(&protocol, 0, 5, "preflight",
++					 "unsupported object ID width");
++		betterleaks_protocol_release(&protocol);
++		clear_mailmap(&mailmap);
++		return 0;
++	}
++	if (git_env_bool("GIT_TEST_BETTERLEAKS_UNSUPPORTED", 0)) {
++		betterleaks_write_error(&protocol, 0, 5, "preflight",
++					 "test-only unsupported capability");
++		betterleaks_protocol_release(&protocol);
++		clear_mailmap(&mailmap);
++		return 0;
++	}
++	betterleaks_write_hello(&protocol);
++	for (;;) {
++		struct betterleaks_frame frame;
++		int read = betterleaks_read_frame(&protocol, &frame);
++		if (read <= 0) {
++			if (read < 0)
++				betterleaks_write_error(&protocol, 0, 1, "read frame",
++							 "malformed or truncated frame");
++			else
++				betterleaks_write_error(&protocol, 0, 1, "read frame",
++							 "EOF before QUIT");
++			betterleaks_frame_release(&frame);
++			break;
++		}
++		if (!memcmp(frame.tag, "QUIT", 4) && !frame.batch_id &&
++		    !frame.payload.len) {
++			betterleaks_frame_release(&frame);
++			break;
++		}
++		if (memcmp(frame.tag, "BGIN", 4)) {
++			betterleaks_write_error(&protocol, frame.batch_id, 1,
++						 "request", "expected BGIN or QUIT");
++			betterleaks_frame_release(&frame);
++			break;
++		}
++		if (process_batch(repo, &protocol, &mailmap, &frame)) {
++			betterleaks_frame_release(&frame);
++			break;
++		}
++		betterleaks_frame_release(&frame);
++	}
++	betterleaks_protocol_release(&protocol);
++	clear_mailmap(&mailmap);
++	return 0;
++}
+diff --git a/command-list.txt b/command-list.txt
+index b7ade3ab9..7685036e6 100644
+--- a/command-list.txt
++++ b/command-list.txt
+@@ -61,6 +61,7 @@ git-apply                               plumbingmanipulators            complete
+ git-archimport                          foreignscminterface
+ git-archive                             mainporcelain
+ git-backfill                            mainporcelain           history
++git-betterleaks--diff-engine            plumbinginterrogators
+ git-bisect                              mainporcelain           info
+ git-blame                               ancillaryinterrogators          complete
+ git-branch                              mainporcelain           history
+diff --git a/diff.c b/diff.c
+index dca87e164..2077183d6 100644
+--- a/diff.c
++++ b/diff.c
+@@ -1590,6 +1590,30 @@ static void emit_diff_symbol(struct diff_options *o, enum diff_symbol s,
+ 	struct emitted_diff_symbol e = {
+ 		.line = line, .len = len, .flags = flags, .s = s
+ 	};
++	struct diff_native_sink *sink = o->native_sink;
++
++	if (sink) {
++		switch (s) {
++		case DIFF_SYMBOL_PLUS:
++			sink->line(sink->data, DIFF_NATIVE_LINE_PLUS, line, len);
++			break;
++		case DIFF_SYMBOL_MINUS:
++			sink->line(sink->data, DIFF_NATIVE_LINE_MINUS, line, len);
++			break;
++		case DIFF_SYMBOL_CONTEXT:
++			sink->line(sink->data, DIFF_NATIVE_LINE_CONTEXT, line, len);
++			break;
++		case DIFF_SYMBOL_CONTEXT_INCOMPLETE:
++			sink->line(sink->data, DIFF_NATIVE_LINE_INCOMPLETE, line, len);
++			break;
++		case DIFF_SYMBOL_NO_LF_EOF:
++			sink->line(sink->data, DIFF_NATIVE_LINE_NO_LF_EOF, line, len);
++			break;
++		default:
++			break;
++		}
++		return;
++	}
+ 
+ 	if (o->emitted_symbols)
+ 		append_emitted_diff_symbol(o, &e);
+@@ -1864,6 +1888,8 @@ static void emit_rewrite_diff(const char *name_a,
+ 	strbuf_addstr(&out, " @@\n");
+ 	emit_diff_symbol(o, DIFF_SYMBOL_REWRITE_DIFF, out.buf, out.len, 0);
+ 	strbuf_release(&out);
++	if (o->native_sink)
++		o->native_sink->hunk_begin(o->native_sink->data, 1);
+ 
+ 	if (lc_a && !o->irreversible_delete)
+ 		emit_rewrite_lines(&ecbdata, '-', data_one, size_one);
+@@ -2389,6 +2415,9 @@ static int fn_out_consume(void *priv, char *line, unsigned long len)
+ 			diff_words_flush(ecbdata);
+ 		len = sane_truncate_line(line, len);
+ 		find_lno(line, ecbdata);
++		if (o->native_sink)
++			o->native_sink->hunk_begin(o->native_sink->data,
++						  ecbdata->lno_in_postimage);
+ 		emit_hunk_header(ecbdata, line, len);
+ 		return 0;
+ 	}
+@@ -3668,6 +3697,8 @@ static void builtin_diff(const char *name_a,
+ 							 0);
+ 				goto free_ab_and_return;
+ 			}
++			if (o->native_sink)
++				o->native_sink->file_binary(o->native_sink->data);
+ 			emit_diff_symbol(o, DIFF_SYMBOL_HEADER,
+ 					 header.buf, header.len, 0);
+ 			strbuf_addf(&sb, "%sBinary files %s and %s differ\n",
+@@ -3689,6 +3720,8 @@ static void builtin_diff(const char *name_a,
+ 						 header.buf, header.len, 0);
+ 			goto free_ab_and_return;
+ 		}
++		if (o->native_sink)
++			o->native_sink->file_binary(o->native_sink->data);
+ 		emit_diff_symbol(o, DIFF_SYMBOL_HEADER, header.buf, header.len, 0);
+ 		strbuf_reset(&header);
+ 		if (o->flags.binary)
+@@ -4585,9 +4618,13 @@ static void run_diff_cmd(const struct external_diff *pgm,
+ 	}
+ 
+ 	if (pgm) {
++		if (o->native_sink)
++			die("external diff is unsupported by the native diff sink");
+ 		run_external_diff(pgm, name, other, one, two, xfrm_msg, o);
+ 		return;
+ 	}
++	if (o->native_sink)
++		o->native_sink->file_begin(o->native_sink->data, p, one, two);
+ 	if (one && two) {
+ 		if (!o->ignore_driver_algorithm && drv && drv->algorithm)
+ 			set_diff_algorithm(o, drv->algorithm);
+@@ -4602,6 +4639,8 @@ static void run_diff_cmd(const struct external_diff *pgm,
+ 		fprintf(o->file, "* Unmerged path %s\n", name);
+ 		o->found_changes = 1;
+ 	}
++	if (o->native_sink)
++		o->native_sink->file_end(o->native_sink->data);
+ }
+ 
+ static void diff_fill_oid_info(struct diff_filespec *one, struct index_state *istate)
+@@ -6677,7 +6716,7 @@ static void diff_flush_patch_all_file_pairs(struct diff_options *o)
+ 	if (WSEH_NEW & WS_RULE_MASK)
+ 		BUG("WS rules bit mask overlaps with diff symbol flags");
+ 
+-	if (o->color_moved)
++	if (o->color_moved && !o->native_sink)
+ 		o->emitted_symbols = &esm;
+ 
+ 	if (o->additional_path_headers)
+diff --git a/diff.h b/diff.h
+index 62e5768a9..d31865ab7 100644
+--- a/diff.h
++++ b/diff.h
+@@ -65,6 +65,7 @@ struct oidset;
+ 
+ struct combine_diff_path;
+ struct commit;
++struct diff_filepair;
+ struct diff_filespec;
+ struct diff_options;
+ struct diff_queue_struct;
+@@ -74,6 +75,27 @@ struct repository;
+ struct rev_info;
+ struct userdiff_driver;
+ 
++enum diff_native_line {
++	DIFF_NATIVE_LINE_PLUS,
++	DIFF_NATIVE_LINE_MINUS,
++	DIFF_NATIVE_LINE_CONTEXT,
++	DIFF_NATIVE_LINE_INCOMPLETE,
++	DIFF_NATIVE_LINE_NO_LF_EOF,
++};
++
++/* Internal typed output below diffcore and userdiff driver selection. */
++struct diff_native_sink {
++	void *data;
++	void (*file_begin)(void *data, struct diff_filepair *pair,
++			   struct diff_filespec *one,
++			   struct diff_filespec *two);
++	void (*file_binary)(void *data);
++	void (*hunk_begin)(void *data, unsigned long new_line);
++	void (*line)(void *data, enum diff_native_line kind,
++		     const char *line, size_t len);
++	void (*file_end)(void *data);
++};
++
+ typedef int (*pathchange_fn_t)(struct diff_options *options,
+ 		 struct combine_diff_path *path);
+ 
+@@ -402,6 +424,7 @@ struct diff_options {
+ 
+ 	struct repository *repo;
+ 	struct strmap *additional_path_headers;
++	struct diff_native_sink *native_sink;
+ 
+ 	int no_free;
+ };
+diff --git a/git.c b/git.c
+index 83eac0aea..7e844f476 100644
+--- a/git.c
++++ b/git.c
+@@ -507,6 +507,7 @@ static struct cmd_struct commands[] = {
+ 	{ "apply", cmd_apply, RUN_SETUP_GENTLY },
+ 	{ "archive", cmd_archive, RUN_SETUP_GENTLY },
+ 	{ "backfill", cmd_backfill, RUN_SETUP },
++	{ "betterleaks--diff-engine", cmd_betterleaks__diff_engine, RUN_SETUP },
+ 	{ "bisect", cmd_bisect, RUN_SETUP },
+ 	{ "blame", cmd_blame, RUN_SETUP },
+ 	{ "branch", cmd_branch, RUN_SETUP | DELAY_PAGER_CONFIG },
+diff --git a/t/helper/betterleaks-engine-client.py b/t/helper/betterleaks-engine-client.py
+new file mode 100755
+index 000000000..8a2b04528
+--- /dev/null
++++ b/t/helper/betterleaks-engine-client.py
+@@ -0,0 +1,245 @@
++#!/usr/bin/env python3
++"""Small protocol-v1 exerciser used by t4218-betterleaks-engine.sh."""
++
++import argparse
++import base64
++import hashlib
++import json
++import os
++import struct
++import subprocess
++import sys
++
++MAX_FRAME = 16 << 20
++
++
++def frame(tag, batch_id, payload=b""):
++    body = tag + struct.pack(">Q", batch_id) + payload
++    return struct.pack(">I", len(body)) + body
++
++
++class Decoder:
++    def __init__(self, data):
++        self.data = data
++        self.pos = 0
++
++    def take(self, size):
++        if len(self.data) - self.pos < size:
++            raise ValueError("truncated payload")
++        value = self.data[self.pos:self.pos + size]
++        self.pos += size
++        return value
++
++    def u32(self):
++        return struct.unpack(">I", self.take(4))[0]
++
++    def u64(self):
++        return struct.unpack(">Q", self.take(8))[0]
++
++    def bytes(self):
++        return self.take(self.u32())
++
++    def done(self):
++        if self.pos != len(self.data):
++            raise ValueError("trailing payload")
++
++
++class Client:
++    def __init__(self, repo):
++        self.proc = subprocess.Popen(
++            ["git", "-C", repo, "betterleaks--diff-engine", "--protocol=1"],
++            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++        )
++        tag, batch, payload = self.read()
++        if tag != b"HELO" or batch or len(payload) != 6:
++            raise ValueError("invalid HELO")
++        version, self.oid_len, all_status, copies = struct.unpack(">HHBB", payload)
++        if version != 1 or self.oid_len not in (20, 32) or all_status or copies:
++            raise ValueError("unexpected capabilities")
++
++    def read(self):
++        prefix = self.proc.stdout.read(4)
++        if len(prefix) != 4:
++            raise ValueError("unexpected EOF: " + self.proc.stderr.read().decode(errors="replace"))
++        length = struct.unpack(">I", prefix)[0]
++        if length < 12 or length > MAX_FRAME:
++            raise ValueError("invalid response frame length")
++        body = self.proc.stdout.read(length)
++        if len(body) != length:
++            raise ValueError("truncated response")
++        return body[:4], struct.unpack(">Q", body[4:12])[0], body[12:]
++
++    def write(self, data):
++        self.proc.stdin.write(data)
++        self.proc.stdin.flush()
++
++    def scan(self, batch_id, hex_oids):
++        oids = [bytes.fromhex(value) for value in hex_oids]
++        payload = struct.pack(">I", len(oids))
++        for oid in oids:
++            payload += struct.pack(">I", len(oid)) + oid
++        self.write(frame(b"BGIN", batch_id, payload))
++        result = {"batch": batch_id, "frames": [], "records": []}
++        continuation = None
++        while True:
++            tag, got_batch, payload = self.read()
++            name = tag.decode("ascii")
++            result["frames"].append(name)
++            if got_batch != batch_id:
++                raise ValueError("wrong batch ID")
++            if tag == b"BGIN":
++                if payload:
++                    raise ValueError("nonempty BGIN response")
++            elif tag == b"CMIT":
++                d = Decoder(payload)
++                oid, message, name_b, email = d.bytes(), d.bytes(), d.bytes(), d.bytes()
++                when, zone = d.u64(), d.u32()
++                has_author, has_time = d.take(1)[0], d.take(1)[0]
++                d.done()
++                result["records"].append({
++                    "kind": "commit", "oid": oid.hex(),
++                    "message": message.decode("utf-8", errors="surrogateescape"),
++                    "author": name_b.decode("utf-8", errors="surrogateescape"),
++                    "email": email.decode("utf-8", errors="surrogateescape"),
++                    "time": when, "zone": struct.unpack(">i", struct.pack(">I", zone))[0],
++                    "has_author": has_author, "has_time": has_time,
++                })
++            elif tag == b"FBEG":
++                d = Decoder(payload)
++                commit, status = d.bytes(), d.take(1).decode("ascii")
++                old_mode, new_mode = d.u32(), d.u32()
++                old_oid, new_oid = d.bytes(), d.bytes()
++                old_path, new_path = d.bytes(), d.bytes()
++                binary = d.take(1)[0]
++                d.done()
++                result["records"].append({
++                    "kind": "file", "commit": commit.hex(), "status": status,
++                    "old_mode": old_mode, "new_mode": new_mode,
++                    "old_oid": old_oid.hex(), "new_oid": new_oid.hex(),
++                    "old_path": base64.b64encode(old_path).decode(),
++                    "new_path": base64.b64encode(new_path).decode(),
++                    "binary": binary,
++                })
++            elif tag == b"HUNK":
++                d = Decoder(payload)
++                commit, path, position, added = d.bytes(), d.bytes(), d.u64(), d.bytes()
++                missing = d.take(1)[0]
++                d.done()
++                result["records"].append(hunk(commit, path, position, added, missing, False))
++            elif tag == b"HBGN":
++                d = Decoder(payload)
++                continuation = [d.bytes(), d.bytes(), d.u64(), bytearray()]
++                d.done()
++            elif tag == b"HADD":
++                if continuation is None or not payload:
++                    raise ValueError("invalid HADD")
++                continuation[3].extend(payload)
++            elif tag == b"HEND":
++                if continuation is None or payload not in (b"\0", b"\1"):
++                    raise ValueError("invalid HEND")
++                result["records"].append(hunk(*continuation, payload[0], True))
++                continuation = None
++            elif tag in (b"FEND", b"CEND"):
++                if payload:
++                    raise ValueError("nonempty end frame")
++            elif tag == b"ERRO":
++                d = Decoder(payload)
++                kind = d.take(1)[0]
++                op, message = d.bytes(), d.bytes()
++                d.done()
++                result["error"] = [kind, op.decode(), message.decode()]
++                return result
++            elif tag == b"BEND":
++                if len(payload) != 25:
++                    raise ValueError("invalid BEND")
++                status = payload[0]
++                counts = struct.unpack(">QQQ", payload[1:])
++                result["completion"] = [status, *counts]
++                return result
++            else:
++                raise ValueError("unexpected frame " + name)
++
++    def close(self):
++        self.write(frame(b"QUIT", 0))
++        self.proc.stdin.close()
++        status = self.proc.wait(timeout=10)
++        stderr = self.proc.stderr.read().decode(errors="replace")
++        if status or stderr:
++            raise ValueError(f"helper exit {status}: {stderr}")
++
++
++def hunk(commit, path, position, added, missing, continued):
++    return {
++        "kind": "hunk", "commit": commit.hex(),
++        "path": base64.b64encode(path).decode(), "position": position,
++        "length": len(added), "sha256": hashlib.sha256(added).hexdigest(),
++        "missing": missing, "continued": continued,
++        "added": base64.b64encode(added).decode() if len(added) < 4096 else None,
++    }
++
++
++def malformed(repo, mode):
++    client = Client(repo)
++    if mode == "short":
++        client.write(struct.pack(">I", 11) + b"x" * 11)
++    elif mode == "oversize":
++        client.write(struct.pack(">I", MAX_FRAME + 1))
++    elif mode == "badtag":
++        client.write(frame(b"NOPE", 1))
++    else:
++        raise ValueError(mode)
++    tag, batch, payload = client.read()
++    if tag != b"ERRO":
++        raise ValueError("malformed request did not return ERRO")
++    print(json.dumps({"tag": "ERRO", "batch": batch, "payload": payload.hex()}))
++    client.proc.stdin.close()
++    client.proc.wait(timeout=10)
++
++
++def unsupported(repo):
++    env = os.environ.copy()
++    env["GIT_TEST_BETTERLEAKS_UNSUPPORTED"] = "1"
++    proc = subprocess.Popen(
++        ["git", "-C", repo, "betterleaks--diff-engine", "--protocol=1"],
++        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++        env=env,
++    )
++    prefix = proc.stdout.read(4)
++    length = struct.unpack(">I", prefix)[0]
++    body = proc.stdout.read(length)
++    if body[:4] != b"ERRO" or struct.unpack(">Q", body[4:12])[0] != 0 or body[12] != 5:
++        raise ValueError("expected pre-HELO unsupported ERRO")
++    proc.stdin.close()
++    if proc.wait(timeout=10):
++        raise ValueError(proc.stderr.read().decode(errors="replace"))
++    print(json.dumps({"tag": "ERRO", "batch": 0, "kind": 5}))
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--repo", default=".")
++    parser.add_argument("--malformed", choices=("short", "oversize", "badtag"))
++    parser.add_argument("--preflight-unsupported", action="store_true")
++    parser.add_argument("batches", nargs="*", help="comma-separated OIDs; '-' is empty")
++    args = parser.parse_args()
++    if args.malformed:
++        malformed(args.repo, args.malformed)
++        return
++    if args.preflight_unsupported:
++        unsupported(args.repo)
++        return
++    client = Client(args.repo)
++    results = []
++    for number, batch in enumerate(args.batches, 1):
++        results.append(client.scan(number, [] if batch == "-" else batch.split(",")))
++        if "error" in results[-1]:
++            client.proc.stdin.close()
++            client.proc.wait(timeout=10)
++            print(json.dumps(results, ensure_ascii=False, sort_keys=True))
++            return
++    client.close()
++    print(json.dumps(results, ensure_ascii=False, sort_keys=True))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/t/meson.build b/t/meson.build
+index bbeba1a8d..26bf042c5 100644
+--- a/t/meson.build
++++ b/t/meson.build
+@@ -550,6 +550,7 @@ integration_tests = [
+   't4215-log-skewed-merges.sh',
+   't4216-log-bloom.sh',
+   't4217-log-limit.sh',
++  't4218-betterleaks-engine.sh',
+   't4252-am-options.sh',
+   't4253-am-keep-cr-dos.sh',
+   't4254-am-corrupt.sh',
+@@ -1214,4 +1215,4 @@ if perl.found() and time.found()
+       timeout: 0,
+     )
+   endforeach
+-endif
+\ No newline at end of file
++endif
+diff --git a/t/t4218-betterleaks-engine.sh b/t/t4218-betterleaks-engine.sh
+new file mode 100755
+index 000000000..e4cd918b2
+--- /dev/null
++++ b/t/t4218-betterleaks-engine.sh
+@@ -0,0 +1,166 @@
++#!/bin/sh
++
++test_description='experimental Betterleaks typed diff engine protocol'
++
++. ./test-lib.sh
++
++client="$TEST_DIRECTORY/helper/betterleaks-engine-client.py"
++test_lazy_prereq PYTHON3 'python3 -c "import sys"'
++
++test_expect_success PYTHON3 'create text, rename, mode, binary, and huge fixtures' '
++	test_create_repo fixture &&
++	(
++		cd fixture &&
++		printf "alpha\nbeta\n" >file.txt &&
++		git add file.txt &&
++		git commit -m "root title" &&
++		git rev-parse HEAD >../root.oid &&
++		printf "alpha\ngamma" >file.txt &&
++		git commit -am "modify without newline" &&
++		git rev-parse HEAD >../modify.oid &&
++		git mv file.txt renamed.txt &&
++		git commit -m rename &&
++		git rev-parse HEAD >../rename.oid &&
++		chmod +x renamed.txt &&
++		git commit -am mode &&
++		git rev-parse HEAD >../mode.oid &&
++		printf "binary\000payload" >binary.dat &&
++		git add binary.dat &&
++		git commit -m binary &&
++		git rev-parse HEAD >../binary.oid &&
++		git mv binary.dat binary-renamed.dat &&
++		git commit -m binary-rename &&
++		git rev-parse HEAD >../binary-rename.oid &&
++		python3 -c "import sys; sys.stdout.write(chr(120) * ((17 << 20) + 7) + chr(10))" >huge.txt &&
++		git add huge.txt &&
++		git commit -m huge &&
++		git rev-parse HEAD >../huge.oid &&
++		printf "unicode\302\205\n\nConflicts:\n\tpath\n" >../whitespace.message &&
++		git commit --allow-empty -F ../whitespace.message &&
++		git rev-parse HEAD >../whitespace.oid &&
++		git tag -a rejected-tag -m tag HEAD &&
++		git rev-parse rejected-tag >../tag.oid &&
++		git checkout -b side &&
++		printf "side\n" >side.txt &&
++		git add side.txt &&
++		git commit -m side &&
++		git checkout master &&
++		printf "main\n" >main.txt &&
++		git add main.txt &&
++		git commit -m main &&
++		git merge --no-ff -m merge side &&
++		git rev-parse HEAD >../merge.oid &&
++		git update-index --add --cacheinfo 160000,$(cat ../root.oid),renamed.txt &&
++		git commit -m typechange &&
++		git rev-parse HEAD >../typechange.oid &&
++		git rm binary-renamed.dat &&
++		git commit -m delete &&
++		git rev-parse HEAD >../delete.oid
++	)
++'
++
++test_expect_success PYTHON3 'handshake and full record semantics' '
++	oids="$(cat root.oid),$(cat modify.oid),$(cat rename.oid),$(cat mode.oid),$(cat binary.oid),$(cat binary-rename.oid),$(cat huge.oid),$(cat whitespace.oid)" &&
++	python3 "$client" --repo fixture "$oids" >actual.json &&
++	python3 - actual.json <<-"PY"
++	import json, sys
++	batch = json.load(open(sys.argv[1]))[0]
++	assert batch["frames"][0] == "BGIN"
++	assert batch["frames"][-1] == "BEND"
++	assert batch["completion"][0] == 0
++	records = batch["records"]
++	commits = [r for r in records if r["kind"] == "commit"]
++	files = [r for r in records if r["kind"] == "file"]
++	hunks = [r for r in records if r["kind"] == "hunk"]
++	assert len(commits) == 8
++	assert commits[0]["message"] == "root title"
++	assert commits[-1]["message"] == "unicode\n\nConflicts:\n        path"
++	assert all(r["has_author"] and r["has_time"] for r in commits)
++	assert any(r["status"] == "R" for r in files)
++	assert any(r["old_mode"] != r["new_mode"] for r in files)
++	assert any(r["binary"] for r in files)
++	import base64
++	binary_rename = next(r for r in files if base64.b64decode(r["new_path"]) == b"binary-renamed.dat")
++	assert binary_rename["status"] == "R" and not binary_rename["binary"]
++	assert any(r["missing"] for r in hunks)
++	assert any(r["continued"] and r["length"] > (16 << 20) for r in hunks)
++	assert batch["completion"][1:] == [len(commits), len(files), len(hunks)]
++	PY
++'
++
++test_expect_success PYTHON3 'empty and two sequential batches reset state' '
++	python3 "$client" --repo fixture - "$(cat root.oid)" "$(cat modify.oid)" >actual.json &&
++	python3 - actual.json <<-"PY"
++	import json, sys
++	batches = json.load(open(sys.argv[1]))
++	assert batches[0]["completion"] == [0, 0, 0, 0]
++	assert batches[1]["completion"][1] == 1
++	assert batches[2]["completion"][1] == 1
++	assert batches[1]["batch"] == 2 and batches[2]["batch"] == 3
++	PY
++'
++
++test_expect_success PYTHON3 'merge diffs and excluded type-change/delete statuses emit commits only' '
++	oids="$(cat merge.oid),$(cat typechange.oid),$(cat delete.oid)" &&
++	python3 "$client" --repo fixture "$oids" >filtered.json &&
++	python3 - filtered.json <<-"PY"
++	import json, sys
++	b = json.load(open(sys.argv[1]))[0]
++	assert b["completion"] == [0, 3, 0, 0]
++	assert [r["kind"] for r in b["records"]] == ["commit", "commit", "commit"]
++	PY
++'
++
++test_expect_success PYTHON3 'missing, tag, and duplicate OIDs are terminal rejections' '
++	missing=$(printf "%040d" 0 | tr 0 f) &&
++	python3 "$client" --repo fixture "$missing" >missing.json &&
++	python3 "$client" --repo fixture "$(cat tag.oid)" >tag.json &&
++	python3 "$client" --repo fixture "$(cat root.oid),$(cat root.oid)" >duplicate.json &&
++	python3 - missing.json tag.json duplicate.json <<-"PY"
++	import json, sys
++	missing, tag, duplicate = (json.load(open(p))[0] for p in sys.argv[1:])
++	assert missing["error"][0] == 2
++	assert tag["error"][0] == 2
++	assert duplicate["error"][0] == 1
++	assert "duplicate" in duplicate["error"][2]
++	PY
++'
++
++test_expect_success PYTHON3 'short, oversized, and unknown frames are rejected' '
++	python3 "$client" --repo fixture --malformed short >short.json &&
++	python3 "$client" --repo fixture --malformed oversize >oversize.json &&
++	python3 "$client" --repo fixture --malformed badtag >badtag.json &&
++	grep ERRO short.json &&
++	grep ERRO oversize.json &&
++	grep ERRO badtag.json
++'
++
++test_expect_success PYTHON3 'unsupported preflight is ERRO kind 5 before HELO' '
++	python3 "$client" --repo fixture --preflight-unsupported >unsupported.json &&
++	grep "kind.*5" unsupported.json
++'
++
++test_lazy_prereq SHA256_ENGINE '
++	git init --bare --object-format=sha256 sha256-probe.git
++'
++
++test_expect_success PYTHON3,SHA256_ENGINE 'SHA-256 raw object IDs are negotiated and scanned' '
++	git init --object-format=sha256 sha256-probe &&
++	(
++		cd sha256-probe &&
++		printf "sha256\n" >file &&
++		git add file &&
++		git commit -m sha256 &&
++		git rev-parse HEAD >../sha256.oid
++	) &&
++	python3 "$client" --repo sha256-probe "$(cat sha256.oid)" >sha256.json &&
++	python3 - sha256.json <<-"PY"
++	import json, sys
++	b = json.load(open(sys.argv[1]))[0]
++	c = next(r for r in b["records"] if r["kind"] == "commit")
++	assert len(c["oid"]) == 64
++	assert b["completion"][1] == 1
++	PY
++'
++
++test_done

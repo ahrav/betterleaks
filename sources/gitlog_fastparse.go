@@ -53,8 +53,9 @@ func fastParseGitLog(r io.Reader) (<-chan *gitdiff.File, error) {
 // fastGitFragment is the parser-native hunk projection. It owns raw and may
 // outlive subsequent reads from the parser's reusable input buffer.
 type fastGitFragment struct {
-	newPosition int64
-	raw         string
+	newPosition         int64
+	raw                 string
+	missingFinalNewline bool
 }
 
 type fastGitIdentity struct {
@@ -101,6 +102,19 @@ func parseFastGitLogSized(r io.Reader, bufSize int, emit func(fastGitFile) error
 		r:    r,
 		buf:  make([]byte, bufSize),
 		emit: emit,
+	}
+	return p.run()
+}
+
+// parseFastGitLogRecords exposes commit boundaries as well as files for the
+// canonical Git reference adapter. It deliberately reuses the production
+// commit-header and patch parser so the two paths cannot drift semantically.
+func parseFastGitLogRecords(r io.Reader, emitHeader func(*fastGitHeader) error, emitFile func(fastGitFile) error) error {
+	p := fastLogParser{
+		r:          r,
+		buf:        make([]byte, fastParseWindowSize),
+		emit:       emitFile,
+		emitHeader: emitHeader,
 	}
 	return p.run()
 }
@@ -163,9 +177,11 @@ func sendFastGitBatch(ctx context.Context, out chan<- []fastGitFile, batch []fas
 }
 
 type fastLogParser struct {
-	r          io.Reader
-	emit       func(fastGitFile) error
-	emitCompat func(*gitdiff.File) error
+	r           io.Reader
+	emit        func(fastGitFile) error
+	emitCompat  func(*gitdiff.File) error
+	emitHeader  func(*fastGitHeader) error
+	callbackErr error
 
 	// buf is the read window: buf[pos:end] holds buffered, unconsumed
 	// bytes. Refilled in place (readLineSlow) once the window is drained.
@@ -327,6 +343,9 @@ func (p *fastLogParser) run() error {
 		switch {
 		case bytes.HasPrefix(p.line, []byte("commit ")):
 			p.parseCommitHeader()
+			if p.callbackErr != nil {
+				return p.callbackErr
+			}
 		case bytes.HasPrefix(p.line, []byte("diff --git ")):
 			if err := p.parseFileDiff(); err != nil {
 				return err
@@ -569,6 +588,9 @@ func (p *fastLogParser) setHeader(h *fastGitHeader, compatHeader *gitdiff.PatchH
 	}
 	p.header = h
 	p.compatHeader = compatHeader
+	if h != nil && p.emitHeader != nil {
+		p.callbackErr = p.emitHeader(h)
+	}
 }
 
 func parseGitLogDate(s string) (time.Time, error) {
@@ -917,9 +939,11 @@ func (p *fastLogParser) parseHunk(f *fastGitFile, compatFile *gitdiff.File) bool
 	// Trailing "\ No newline at end of file": strips the final newline of
 	// the last emitted line (only affects Raw when that line was an add).
 	// Shrinking the arena is safe: the dropped byte was never exposed.
+	missingFinalNewline := false
 	if p.line != nil && len(p.line) >= 2 && p.line[0] == '\\' && p.line[1] == ' ' {
 		if n := len(p.arena); lastWasAdd && n > hunkStart && p.arena[n-1] == '\n' {
 			p.arena = p.arena[:n-1]
+			missingFinalNewline = true
 		}
 		p.readLine()
 	}
@@ -948,8 +972,9 @@ func (p *fastLogParser) parseHunk(f *fastGitFile, compatFile *gitdiff.File) bool
 		compatFile.TextFragments = append(compatFile.TextFragments, fragment)
 	} else {
 		f.fragments = append(f.fragments, fastGitFragment{
-			newPosition: newStart,
-			raw:         raw,
+			newPosition:         newStart,
+			raw:                 raw,
+			missingFinalNewline: missingFinalNewline,
 		})
 	}
 	return true

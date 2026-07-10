@@ -68,6 +68,20 @@ func gitConfigIsolationEnv() []string {
 	}
 
 	env := os.Environ()
+	filtered := env[:0]
+	for _, entry := range env {
+		// Presentation-only diff settings from the caller must not leak into a
+		// scan whose diff shape is pinned explicitly by the production profile.
+		if strings.HasPrefix(entry, "GIT_DIFF_OPTS=") ||
+			strings.HasPrefix(entry, "GIT_CONFIG_PARAMETERS=") ||
+			strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") ||
+			strings.HasPrefix(entry, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(entry, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	env = filtered
 	// Replace or append each override key.
 	for i, e := range env {
 		for k, v := range overrides {
@@ -112,6 +126,14 @@ func gitConfigIsolationEnv() []string {
 		env = append(env, "MALLOC_ARENA_MAX=2")
 	}
 	return env
+}
+
+// GitConfigIsolationEnv returns the environment used by production Git scan
+// subprocesses. Candidate-engine benchmarks use it to keep Git configuration,
+// delta caching, allocator tuning, and optional zlib injection identical to the
+// reference path.
+func GitConfigIsolationEnv() []string {
+	return gitConfigIsolationEnv()
 }
 
 // setEnvVar replaces key's value in env or appends it when absent.

@@ -1,0 +1,21 @@
+date_utc: 2026-07-11T02:53:34Z
+kernel: 6.12.92-122.168.amzn2023.aarch64
+cpu: 
+nproc: 64
+mem: MemTotal:       129541096 kB
+governor: none
+
+binaries:
+14098122840928b53936cd6a3bc397dcd259d34c76148c30c990bf70267823d8  betterleaks-ab
+a421445d15b3951a39cf1e9e9f37d82cac6cf055dfbd5a8092f2206bfb2c1901  gitengine-bench
+45283e3c6cea6d9af55132bbfe3103dd35b930b3de3b42f6bb45bcaa6a404081  stock-git/git
+dcb6b9f9c08c6c6897665517a8ebb78f78997e7b6d4cf68a173d04e61ca9e8f2  patched-git/git
+47a352548d5ce6e2adf1b6b1ad646529a7f5477e54c738ce6dc608d3bdb07874  /usr/bin/git
+
+betterleaks commit: f5252b60cfb695008b6e268c124471c81b33fcc5
+git source commit: c44beea485 (v2.51.0)
+corpus HEAD: 754df18208dd903e1b05c7a4343da272079bea3d
+corpus ref digest: deed23c8c84f6c1ae6037989040f5b9b7f3ebbe7a395f896ec86ee565436783c
+corpus rev digest: e2e8f26e5fed457385c0b782346d05daee3bd31dbf4ea4d0eba13aeffb4e6c59
+record digest (both engines): 49139d357cb54d84b515204f23ef221be21fe1210287101cda1002cda1393b93
+records: 24253390 files: 2820879 hunks: 21235333 canonical bytes: 5495475641

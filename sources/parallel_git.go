@@ -2,6 +2,7 @@ package sources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/gitleaks/go-gitdiff/gitdiff"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/betterleaks/betterleaks/internal/gitengine"
 	"github.com/betterleaks/betterleaks/logging"
 	"github.com/betterleaks/betterleaks/sources/scm"
 )
@@ -74,6 +76,23 @@ func (s *ParallelGit) Fragments(ctx context.Context, yield FragmentsFunc) error 
 		batches <- batch
 	}
 	close(batches)
+
+	// Experimental native-record engine path. Only active when the caller
+	// explicitly opts in via BETTERLEAKS_GIT_ENGINE_BIN and the default
+	// profile is in effect (user --log-opts always keeps the compatible
+	// text path). Fallback is decided only at the preflight barrier, before
+	// any record has been emitted; runtime engine errors are terminal.
+	if bin := engineBinary(); bin != "" && s.LogOpts == "" {
+		factory, err := s.enginePreflight(ctx, bin)
+		if err != nil {
+			if engineStrict() || !errors.Is(err, gitengine.ErrUnsupported) {
+				return err
+			}
+			logging.Warn().Err(err).Msg("git engine preflight unsupported; falling back to text path")
+		} else {
+			return s.runEngineScan(ctx, yield, batches, workers, factory)
+		}
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	for range workers {

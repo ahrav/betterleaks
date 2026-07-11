@@ -1450,7 +1450,7 @@ new file mode 100755
 index 000000000..e4cd918b2
 --- /dev/null
 +++ b/t/t4218-betterleaks-engine.sh
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,168 @@
 +#!/bin/sh
 +
 +test_description='experimental Betterleaks typed diff engine protocol'
@@ -1541,15 +1541,17 @@ index 000000000..e4cd918b2
 +	PY
 +'
 +
-+test_expect_success PYTHON3 'empty and two sequential batches reset state' '
-+	python3 "$client" --repo fixture - "$(cat root.oid)" "$(cat modify.oid)" >actual.json &&
++test_expect_success PYTHON3 'sequential batches reset request-local state' '
++	python3 "$client" --repo fixture - "$(cat root.oid)" "$(cat modify.oid)" "$(cat root.oid)" >actual.json &&
 +	python3 - actual.json <<-"PY"
 +	import json, sys
 +	batches = json.load(open(sys.argv[1]))
 +	assert batches[0]["completion"] == [0, 0, 0, 0]
 +	assert batches[1]["completion"][1] == 1
 +	assert batches[2]["completion"][1] == 1
-+	assert batches[1]["batch"] == 2 and batches[2]["batch"] == 3
++	assert batches[3]["completion"][1] == 1
++	assert [batch["batch"] for batch in batches] == [1, 2, 3, 4]
++	assert batches[1]["records"][0]["oid"] == batches[3]["records"][0]["oid"]
 +	PY
 +'
 +
@@ -1564,11 +1566,11 @@ index 000000000..e4cd918b2
 +	PY
 +'
 +
-+test_expect_success PYTHON3 'missing, tag, and duplicate OIDs are terminal rejections' '
++test_expect_success PYTHON3 'missing, tag, and non-adjacent duplicate OIDs are terminal rejections' '
 +	missing=$(printf "%040d" 0 | tr 0 f) &&
 +	python3 "$client" --repo fixture "$missing" >missing.json &&
 +	python3 "$client" --repo fixture "$(cat tag.oid)" >tag.json &&
-+	python3 "$client" --repo fixture "$(cat root.oid),$(cat root.oid)" >duplicate.json &&
++	python3 "$client" --repo fixture "$(cat root.oid),$(cat modify.oid),$(cat root.oid)" >duplicate.json &&
 +	python3 - missing.json tag.json duplicate.json <<-"PY"
 +	import json, sys
 +	missing, tag, duplicate = (json.load(open(p))[0] for p in sys.argv[1:])

@@ -548,6 +548,66 @@ func TestProcessFullLifecycleAndBufferOwnership(t *testing.T) {
 	}
 }
 
+func TestProcessBufferedReaderPreservesPrefetchedFrames(t *testing.T) {
+	capabilities := Capabilities{
+		ProtocolVersion: ProtocolVersion,
+		OIDLength:       20,
+		AllStatuses:     true,
+		FindCopies:      true,
+	}
+	requests := []BatchRequest{
+		{ID: 17, Commits: []OID{testOID(20, 1)}},
+		{ID: 18, Commits: []OID{testOID(20, 2)}},
+	}
+	var wire bytes.Buffer
+	if err := WriteFrame(&wire, HelloFrame(capabilities), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range requests {
+		if err := emitCommitOnlyBatch(&wire, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	source := bytes.NewReader(wire.Bytes())
+	w := &processWorker{
+		config:       ProcessConfig{MaxFrame: 4 << 20},
+		stdout:       bufio.NewReaderSize(source, wire.Len()),
+		capabilities: capabilities,
+		profile:      ProductionProfile(),
+	}
+	hello, err := ReadFrame(w.stdout, w.config.MaxFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeHello(hello); err != nil {
+		t.Fatal(err)
+	}
+	if source.Len() != 0 || w.stdout.Buffered() == 0 {
+		t.Fatalf("HELO did not prefetch the remaining frames: source=%d buffered=%d", source.Len(), w.stdout.Buffered())
+	}
+
+	var records []Record
+	for _, request := range requests {
+		result, err := w.readBatch(request, func(record Record) error {
+			records = append(records, record)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Commits != 1 {
+			t.Fatalf("batch %d commits = %d", request.ID, result.Commits)
+		}
+	}
+	if w.stdout.Buffered() != 0 || len(records) != 2 {
+		t.Fatalf("remaining buffered bytes=%d records=%d", w.stdout.Buffered(), len(records))
+	}
+	if !bytes.Equal(records[0].Commit.OID, requests[0].Commits[0]) || !bytes.Equal(records[1].Commit.OID, requests[1].Commits[0]) {
+		t.Fatalf("decoded records changed: %#v", records)
+	}
+}
+
 func TestProcessTerminalFailures(t *testing.T) {
 	tests := []struct {
 		name, scenario string

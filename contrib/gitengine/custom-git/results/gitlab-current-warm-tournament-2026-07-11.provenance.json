@@ -1,0 +1,88 @@
+{
+  "date_utc": "2026-07-11",
+  "corpus": {
+    "path": "/local/home/ahrav/scratch/gitlab-foss",
+    "head": "754df18208dd903e1b05c7a4343da272079bea3d",
+    "commits": 197178,
+    "refs": 6270,
+    "pack_bytes": 1955521924,
+    "index_bytes": 96173036,
+    "reverse_index_bytes": 13738904,
+    "pack_bytes_description": "one 1.821 GiB pack plus 91.718 MiB index and 13.102 MiB reverse index",
+    "ref_digest": "deed23c8c84f6c1ae6037989040f5b9b7f3ebbe7a395f896ec86ee565436783c",
+    "revision_digest": "e2e8f26e5fed457385c0b782346d05daee3bd31dbf4ea4d0eba13aeffb4e6c59"
+  },
+  "canonical_oracle": {
+    "digest": "49139d357cb54d84b515204f23ef221be21fe1210287101cda1002cda1393b93",
+    "records": 24253390,
+    "commit_records": 197178,
+    "file_records": 2820879,
+    "hunk_records": 21235333,
+    "canonical_bytes": 5495475641,
+    "full_per_commit_compare": "compared=197178 mismatches=0"
+  },
+  "source": {
+    "betterleaks_base_revision": "8f30c9c326f273d541e2397160955baa1520ea38",
+    "betterleaks_branch": "codex/betterleaks-next-engine-20260711",
+    "git_revision": "c44beea485f0f2feaf460e2ac87fdd5608d63cf0",
+    "measured_custom_git_patch_sha256": "684392c61ba34a18cdc62aff3482961a9e87d690c96da20c13c052206fb76332",
+    "delivered_custom_git_patch_sha256": "6e313872d0f06709b66cc52026709366ce2914ec83c01f2fae2d69e6313073e7",
+    "delivered_patch_difference": "test-only hardening for cross-batch and non-adjacent duplicate OIDs, plus corrected test-script hunk accounting",
+    "measured_xdiff_source_diff_sha256": "8e79314f9f511b231ff393a8d2d8ec47f55ea3f281e13ca512e533d72ef09a15",
+    "delivered_xdiff_patch_sha256": "170672419da94d5735092f86405b8cc9b550abac81398a2329fc2e53a44b9ab0",
+    "delivered_xdiff_difference": "comment-only rationale added around the same compiled xdl_hash_record implementation",
+    "xxhash_v0_8_2_sha256": "be275e9db21a503c37f24683cdb4908f2370a3e35ab96e02c4ea73dc8e399c43"
+  },
+  "delivered_file_sha256": {
+    "internal/gitengine/process.go": "c9d6cebbda85b5778b2c7b1a0315fd07c744e34b8a6b202589908f65c27bf19a",
+    "internal/gitengine/process_test.go": "5a19ec923199da4755e8704ac41fae1a98d18c2dca99f9255762cb5db37aeb17",
+    "contrib/gitengine/bench/main.go": "d2769394b2c72fcfb6191af47d5b1d8044f80b134aacd1f09f1cc5f4c490fae9",
+    "contrib/gitengine/custom-git/measure_bench.py": "2ceb2a9f6ec8b604c7ee346705af007199782996a48e5a4eb12402b10b6c1218",
+    "contrib/gitengine/custom-git/README.md": "d9c88bd7399e5b381134afa14a4686160f7049ec60cb4237a6659da52c1eb7ea",
+    "contrib/gitengine/custom-git/betterleaks-diff-engine.patch": "6e313872d0f06709b66cc52026709366ce2914ec83c01f2fae2d69e6313073e7",
+    "contrib/fastgit/verify/hash_semantics.c": "d22486004146a2e70ab8017bdc405bce2ae3dd4e900a601d601175fb74d82a76"
+  },
+  "executables": {
+    "baseline_git_sha256": "06a010aff88219e3bcec64be7f8adf582e47e7d099779c873096ab39e01692d8",
+    "oidset_o2_git_sha256": "27a91511ccc1f80517c40b6796ad252a6cfba32c4f33fb170d58f6b052ce549a",
+    "oidset_xxh3_o2_git_sha256": "529351fcf54ffb25b71c72ad852d085ff61b94f5cf7f0543d4491c025fd1fe1b",
+    "oidset_xxh3_o3lto_git_sha256": "4382195b3f82012a2ab6fdbc29ee6dcee2d067c2440979e60f6420482e3bed5c",
+    "kept_git_sha256": "d75c086fa6ee4377184ec9c2a432376c98cc44c50a786ce3401036746611d310",
+    "unbuffered_benchmark_sha256": "98a4088172f17f4c66b56da6af98b3f74bd11434c61092d1fbf19d08b75ed047",
+    "buffered_4k_benchmark_sha256": "ea3c7ad8e50608191986cc3107ab3401b7966a156bbe00b54a25bcccd80ab441",
+    "measured_buffered_64k_benchmark_sha256": "b4c9b61f5a96a81cde4ed31d2f96a2e4b570841e8cf04b5c5f821217970a5bae",
+    "rebuilt_buffered_64k_benchmark_sha256": "5134db474a7db642580fe2fb5199e1503949cc2ff9173142987bcadc94fdf313",
+    "buffered_64k_shared_text_sha256": "ece3327883a11205cf1cf8c3f62c64a2fb5d7db2f8853fe9f8b56b5ca90c82ad",
+    "buffered_64k_rebuild_note": "measured full binary was overwritten; rebuilt binary has identical 2658148-byte .text but different non-text ELF content",
+    "buffered_256k_benchmark_sha256": "8b75a7b945d1f759fcde5fe4fd2737979d953bd60d362214521c2eddd31e0f62",
+    "compare_binary_sha256": "d6ae7b289a5dfa6c0d9d1d18121daf0be5d4316677d1992d48f578dd319ca0e7"
+  },
+  "measurement": {
+    "cache_state": "warm",
+    "primary_workers": 10,
+    "packed_git_overrides": false,
+    "recycle_batches": 0,
+    "malloc_arena_max": 2,
+    "rss_sample_interval_seconds": 0.1,
+    "helper_cpu_scope": "all reaped helper processes including preflight, startup scan, and teardown",
+    "rss_scope": "sampled aggregate resident set of engine helper processes only",
+    "storage_scope": "procfs read_bytes and major faults for observed helper descendants",
+    "archived_outer_wall_scope": "clock started after Popen and exit was detected by 100 ms polling; launch is omitted and exit detection can add up to one interval",
+    "archived_process_tree_io_scope": "not valid for aggregation because waited child I/O is also folded into its parent; these raw fields are excluded from conclusions"
+  },
+  "host": {
+    "architecture": "aarch64",
+    "cpu": "64-core ARM Neoverse V1, one socket, no SMT",
+    "cpu_part": "0xd40",
+    "memory_gib": 123,
+    "kernel": "6.12.92-122.168.amzn2023.aarch64",
+    "page_bytes": 4096,
+    "perf_event_paranoid": 2,
+    "go": "go1.25.11 linux/arm64",
+    "compiler": "GCC 11.5.0",
+    "system_git": "2.50.1",
+    "patched_git": "2.51.0.dirty"
+  },
+  "notes_sha256": "22b0ef15af89af4336f12c43ae1c9d88cbe5598d02b809ccf7a056317ada8daa",
+  "raw_results_sha256": "60c32762f97e464c2aa469e1b9d2ba48bd6f254082a0609b5b1fac9a4a35fa79"
+}

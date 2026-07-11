@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +45,26 @@ type options struct {
 	wantFiles      uint64
 	wantHunks      uint64
 	wantBytes      uint64
+	observeExit    func(gitengine.ProcessStats)
+}
+
+type cpuAccumulator struct {
+	mu     sync.Mutex
+	user   time.Duration
+	system time.Duration
+}
+
+func (c *cpuAccumulator) add(stats gitengine.ProcessStats) {
+	c.mu.Lock()
+	c.user += stats.UserCPU
+	c.system += stats.SystemCPU
+	c.mu.Unlock()
+}
+
+func (c *cpuAccumulator) snapshot() (time.Duration, time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.user, c.system
 }
 
 type digest struct {
@@ -116,10 +137,15 @@ type report struct {
 	RevisionDigest string  `json:"revision_digest"`
 	PreflightMS    float64 `json:"preflight_ms"`
 	ScanMS         float64 `json:"scan_ms"`
+	EngineCPUScope string  `json:"engine_cpu_scope,omitempty"`
+	EngineUserMS   float64 `json:"engine_user_cpu_ms,omitempty"`
+	EngineSystemMS float64 `json:"engine_system_cpu_ms,omitempty"`
+	EngineTotalMS  float64 `json:"engine_total_cpu_ms,omitempty"`
 }
 
 func main() {
 	var opts options
+	var cpuProfile, heapProfile string
 	flag.StringVar(&opts.engine, "engine", "reference", "reference, custom-git, libgit2, gix, or gix-git-rename-fallback")
 	flag.StringVar(&opts.helper, "helper", "", "candidate helper executable (or patched git for custom-git)")
 	flag.StringVar(&opts.repo, "repo", "", "repository to scan")
@@ -137,9 +163,41 @@ func main() {
 	flag.Uint64Var(&opts.wantFiles, "expected-files", 0, "required file count (zero disables)")
 	flag.Uint64Var(&opts.wantHunks, "expected-hunks", 0, "required hunk count (zero disables)")
 	flag.Uint64Var(&opts.wantBytes, "expected-canonical-bytes", 0, "required canonical byte count (zero disables)")
+	flag.StringVar(&cpuProfile, "cpu-profile", "", "write a Go CPU profile to this path")
+	flag.StringVar(&heapProfile, "heap-profile", "", "write a Go heap profile to this path after the scan")
 	flag.Parse()
-	if err := run(opts); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+
+	var cpuFile *os.File
+	if cpuProfile != "" {
+		var err error
+		cpuFile, err = os.Create(cpuProfile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(cpuFile); err != nil {
+			_ = cpuFile.Close()
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	runErr := run(opts)
+	if cpuFile != nil {
+		pprof.StopCPUProfile()
+		runErr = errors.Join(runErr, cpuFile.Close())
+	}
+	if heapProfile != "" {
+		profile, err := os.Create(heapProfile)
+		if err == nil {
+			runtime.GC()
+			err = pprof.WriteHeapProfile(profile)
+			err = errors.Join(err, profile.Close())
+		}
+		runErr = errors.Join(runErr, err)
+	}
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, runErr)
 		os.Exit(1)
 	}
 }
@@ -147,6 +205,10 @@ func main() {
 func run(opts options) error {
 	if err := validateOptions(opts); err != nil {
 		return err
+	}
+	var engineCPU cpuAccumulator
+	if opts.engine != "reference" {
+		opts.observeExit = engineCPU.add
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -227,6 +289,7 @@ func run(opts options) error {
 	if opts.wantBytes != 0 && total.CanonicalBytes != opts.wantBytes {
 		return fmt.Errorf("canonical bytes %d != expected %d", total.CanonicalBytes, opts.wantBytes)
 	}
+	engineUser, engineSystem := engineCPU.snapshot()
 
 	result := report{
 		Engine: opts.engine, Repository: opts.repo, Workers: opts.workers,
@@ -237,6 +300,12 @@ func run(opts options) error {
 		Files: total.Files, Hunks: total.Hunks, CanonicalBytes: total.CanonicalBytes,
 		Digest: total.String(), RefDigest: refDigest, RevisionDigest: revisionDigest,
 		PreflightMS: milliseconds(preflightDuration), ScanMS: milliseconds(scanDuration),
+	}
+	if opts.engine != "reference" {
+		result.EngineCPUScope = "all_reaped_helper_processes_including_preflight_startup_scan_and_teardown"
+		result.EngineUserMS = milliseconds(engineUser)
+		result.EngineSystemMS = milliseconds(engineSystem)
+		result.EngineTotalMS = milliseconds(engineUser + engineSystem)
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -293,7 +362,9 @@ func newFactory(opts options) (gitengine.Factory, error) {
 	default:
 		return nil, fmt.Errorf("unknown engine %q", opts.engine)
 	}
-	return gitengine.NewProcessFactory(gitengine.ProcessConfig{Command: command})
+	return gitengine.NewProcessFactory(gitengine.ProcessConfig{
+		Command: command, ObserveExit: opts.observeExit,
+	})
 }
 
 func gixHelperCommand(helper, repo string, ambiguousRenameFallback bool) *exec.Cmd {

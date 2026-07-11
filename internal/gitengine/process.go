@@ -1,6 +1,7 @@
 package gitengine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -15,13 +16,24 @@ import (
 // CommandBuilder constructs a fresh helper command for one repository.
 type CommandBuilder func(repoPath string, profile ScanProfile) *exec.Cmd
 
+// One persistent buffer amortizes frame-header reads across the helper stream.
+const processReadBufferSize = 64 << 10
+
 // ProcessConfig configures bounded helper process orchestration.
 type ProcessConfig struct {
-	Command    CommandBuilder
-	MaxFrame   uint32
-	MaxRecord  uint64
-	StderrTail int
-	KillGrace  time.Duration
+	Command     CommandBuilder
+	MaxFrame    uint32
+	MaxRecord   uint64
+	StderrTail  int
+	KillGrace   time.Duration
+	ObserveExit func(ProcessStats)
+}
+
+// ProcessStats reports CPU consumed by one reaped helper process. ObserveExit
+// receives these values after Wait, may run concurrently, and must return promptly.
+type ProcessStats struct {
+	UserCPU   time.Duration
+	SystemCPU time.Duration
 }
 
 // ProcessFactory enforces a successful repository-wide preflight before any
@@ -111,7 +123,7 @@ type processWorker struct {
 	config       ProcessConfig
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
-	stdout       io.ReadCloser
+	stdout       *bufio.Reader
 	stderr       *tailBuffer
 	capabilities Capabilities
 	profile      ScanProfile
@@ -160,7 +172,7 @@ func startProcess(ctx context.Context, config ProcessConfig, repoPath string, pr
 		config:   config,
 		cmd:      cmd,
 		stdin:    stdin,
-		stdout:   stdout,
+		stdout:   bufio.NewReaderSize(stdout, processReadBufferSize),
 		stderr:   newTailBuffer(config.StderrTail),
 		waitDone: make(chan struct{}),
 		profile:  profile,
@@ -170,6 +182,12 @@ func startProcess(ctx context.Context, config ProcessConfig, repoPath string, pr
 	}()
 	go func() {
 		err := cmd.Wait()
+		if config.ObserveExit != nil && cmd.ProcessState != nil {
+			config.ObserveExit(ProcessStats{
+				UserCPU:   cmd.ProcessState.UserTime(),
+				SystemCPU: cmd.ProcessState.SystemTime(),
+			})
+		}
 		w.mu.Lock()
 		w.waitErr = err
 		w.mu.Unlock()
@@ -177,7 +195,7 @@ func startProcess(ctx context.Context, config ProcessConfig, repoPath string, pr
 	}()
 
 	stop := context.AfterFunc(ctx, func() { w.interrupt() })
-	frame, readErr := ReadFrame(stdout, config.MaxFrame)
+	frame, readErr := ReadFrame(w.stdout, config.MaxFrame)
 	stop()
 	if readErr != nil {
 		err := w.terminal("handshake", 0, ErrorProtocol, readErr)

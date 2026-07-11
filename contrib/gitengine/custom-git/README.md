@@ -11,13 +11,51 @@ Apply `betterleaks-diff-engine.patch` to that commit, then build and run the
 focused gates:
 
 ```sh
+set -eu
 git apply /path/to/betterleaks-diff-engine.patch
-make DEVELOPER=1 -j8 git
-make -C t T=t4218-betterleaks-engine.sh
-make -C t T=t4013-diff-various.sh
-make -C t T=t4202-log.sh
-make check-docs
+make DEVELOPER=1 -j8 all
+make DEVELOPER=1 -C t T=t4218-betterleaks-engine.sh
+make DEVELOPER=1 -C t T=t4013-diff-various.sh
+make DEVELOPER=1 -C t T=t4202-log.sh
+make DEVELOPER=1 check-docs
 ```
+
+## Profiled performance build
+
+Starting from an untouched checkout at the pinned Git commit, the kept
+performance configuration also applies the repository's xdiff line-hash
+patch. Fetch the released header by content hash; do not build against an
+unpinned checkout:
+
+```sh
+set -eu
+git apply /path/to/betterleaks/contrib/gitengine/custom-git/betterleaks-diff-engine.patch
+curl --proto '=https' --tlsv1.2 -fL \
+  https://raw.githubusercontent.com/Cyan4973/xxHash/v0.8.2/xxhash.h \
+  -o xdiff/xxhash.h
+echo 'be275e9db21a503c37f24683cdb4908f2370a3e35ab96e02c4ea73dc8e399c43  xdiff/xxhash.h' |
+  sha256sum -c -
+git apply /path/to/betterleaks/contrib/fastgit/xdiff-xxh3.patch
+make -j8 NO_CURL=1 NO_GETTEXT=1 all
+make NO_CURL=1 NO_GETTEXT=1 -C t T=t4218-betterleaks-engine.sh
+make NO_CURL=1 NO_GETTEXT=1 -C t T=t4013-diff-various.sh
+make NO_CURL=1 NO_GETTEXT=1 -C t T=t4202-log.sh
+make NO_CURL=1 NO_GETTEXT=1 check-docs
+```
+
+The patch replaces xdiff's serial DJB2 line hash with `memchr` plus XXH3.
+Record equality is still verified by xdiff, so the hash remains an internal
+bucket key. On AArch64 the patch selects xxHash's portable scalar backend to
+avoid its unaligned NEON loads under UBSan; `memchr` remains the maintained
+vectorized newline scan. Other targets use xxHash's normal compile-time
+selection, with its portable scalar implementation as the build fallback.
+Distributing the header retains its BSD-2-Clause notice; distributing the
+patched Git remains subject to Git's GPLv2 terms.
+
+The native protocol consumer retains one 64 KiB buffered reader across the
+HELO handshake and every batch. This is part of Betterleaks itself and does
+not change the wire format; it does not imply that the native engine is wired
+into the production scanner.
 
 The patch adds `git betterleaks--diff-engine`, a persistent builtin that emits
 the common native-record protocol. Use the resulting Git executable through
@@ -60,6 +98,22 @@ The frozen full-history benchmark requires this authoritative result:
 | Canonical multiset digest | `15bf91a9c237467054c9e2f3e11f405109256231e5c7928d13621b2cdb7d6e72` |
 | Ref snapshot digest | `d3a5a08289c2471fe300abcb50c58308fda1e43c78d2fd77fa667b608d3711d9` |
 | Revision snapshot digest | `16fd50d990ed2df94e6384a542c1aa2bfb2054fb83ca0aced917115a8f441eeb` |
+
+The live corpus advanced before the 2026-07-11 tournament. Its separate
+authoritative identity is:
+
+| Field | Value |
+|---|---:|
+| Requested commits / commit records | 197,178 |
+| File records | 2,820,879 |
+| Hunk records | 21,235,333 |
+| Total records | 24,253,390 |
+| Canonical bytes | 5,495,475,641 |
+| Canonical multiset digest | `49139d357cb54d84b515204f23ef221be21fe1210287101cda1002cda1393b93` |
+| Ref snapshot digest | `deed23c8c84f6c1ae6037989040f5b9b7f3ebbe7a395f896ec86ee565436783c` |
+| Revision snapshot digest | `e2e8f26e5fed457385c0b782346d05daee3bd31dbf4ea4d0eba13aeffb4e6c59` |
+
+Do not combine timing rows from the frozen and live corpus identities.
 
 `contrib/gitengine/bench` rejects a run when an expected snapshot digest,
 record digest, record count, or canonical byte count differs. Matching only
@@ -170,11 +224,14 @@ Raw artifacts:
 - `contrib/gitengine/custom-git/results/gitlab-full-warm-balanced-2026-07-10.notes.md`
 - `contrib/gitengine/custom-git/results/gitlab-sample20k-matrix-2026-07-10.jsonl`
 - `contrib/gitengine/custom-git/results/gitlab-sample20k-matrix-2026-07-10.notes.md`
+- `contrib/gitengine/custom-git/results/gitlab-current-warm-tournament-2026-07-11.jsonl`
+- `contrib/gitengine/custom-git/results/gitlab-current-warm-tournament-2026-07-11.notes.md`
+- `contrib/gitengine/custom-git/results/gitlab-current-warm-tournament-2026-07-11.provenance.json`
 
-These artifacts retain the benchmark's exact output identity but not the
-zero-mismatch comparator transcript. Preserve that transcript with the next
-scheduled full comparison to make the per-commit parity result independently
-auditable from the results directory.
+The 2026-07-11 notes and provenance retain the full comparator's terminal
+result, `compared=197178 mismatches=0`, alongside the current corpus and binary
+identities. Older artifacts retain benchmark output identity but not their
+zero-mismatch comparator transcript.
 
 `rss_probe.py` remains the lower-level single-helper tool for observing RSS at
 each batch boundary while discarding record payloads.

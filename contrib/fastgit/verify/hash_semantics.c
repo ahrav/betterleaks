@@ -27,7 +27,10 @@
 #include <unistd.h>
 
 #define XXH_INLINE_ALL
-#define XXH_NO_XXH32   /* as the patch does -- deliberately, to mirror it */
+#define XXH_NO_STREAM
+#if defined(__aarch64__)
+#define XXH_VECTOR 0
+#endif
 #include "xxhash.h"
 
 /* ---- OLD implementation (verbatim from vanilla xutils.c, fast path) ---- */

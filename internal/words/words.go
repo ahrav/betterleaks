@@ -13,7 +13,10 @@ var compressedWords []byte
 
 var (
 	nltkWords map[string]struct{}
-	wordsOnce sync.Once
+	// maxWordLen bounds the longest dictionary word, capping the inner
+	// substring-length loop in the search functions.
+	maxWordLen int
+	wordsOnce  sync.Once
 )
 
 // loadWords decompresses the embedded wordlist and populates the map.
@@ -32,6 +35,9 @@ func loadWords() {
 		word := scanner.Text()
 		if word != "" {
 			nltkWords[word] = struct{}{}
+			if len(word) > maxWordLen {
+				maxWordLen = len(word)
+			}
 		}
 	}
 

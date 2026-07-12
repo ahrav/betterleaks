@@ -195,13 +195,13 @@ func failsTokenEfficiency(tke *tiktoken.Tiktoken, secret string) bool {
 	if len(tokens) == 0 {
 		return false
 	}
-	if len(words.HasMatchInList(analyzed, 5)) > 0 {
+	if words.HasAnyMatchInList(analyzed, 5) {
 		return true
 	}
 	threshold := 2.5
 	if len(analyzed) < 12 {
 		threshold = 2.1
-		if len(words.HasMatchInList(analyzed, 4)) == 0 {
+		if !words.HasAnyMatchInList(analyzed, 4) {
 			threshold = 2.5
 		}
 	}

@@ -60,3 +60,29 @@ func HasMatchInList(word string, minLen int) []Result {
 		Matches:     matches,
 	}}
 }
+
+// HasAnyMatchInList reports whether any dictionary word of length >= minLen
+// appears as a substring of word. Equivalent to len(HasMatchInList(...)) > 0
+// (asserted by differential test) but returns at the first hit and bounds
+// substring lengths by the dictionary's longest word.
+func HasAnyMatchInList(word string, minLen int) bool {
+	wordsOnce.Do(loadWords)
+
+	word = strings.ToLower(word)
+	if len(word) < minLen {
+		return false
+	}
+
+	for start := 0; start <= len(word)-minLen; start++ {
+		maxLen := len(word) - start
+		if maxLen > maxWordLen {
+			maxLen = maxWordLen
+		}
+		for length := minLen; length <= maxLen; length++ {
+			if _, exists := nltkWords[word[start:start+length]]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}

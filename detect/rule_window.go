@@ -455,3 +455,61 @@ func longestNewlineFreeRun(buf []byte) int {
 		from += idx + 1
 	}
 }
+
+// ruleWindowsFromPositions builds merged scan windows from occurrence
+// positions recorded during the prefilter scan, avoiding the per-rule
+// bytes.Index rediscovery in ruleWindows. patterns lists the rule's
+// keyword pattern indices; kwLen gives each pattern's keyword length.
+// Returns (windows, true) when every pattern's recorded list is complete,
+// or (nil, false) when any overflowed — the caller falls back to
+// ruleWindows (sound: recorded lists are only used when complete).
+// Same coverage fallback as ruleWindows: nil windows when merged spans
+// cover most of the fragment.
+func ruleWindowsFromPositions(rec *occRecorder, patterns []uint32, kwLen []int32, bufLen, maxWidth int) ([][2]int, bool) {
+	var spans [][2]int
+	for _, pat := range patterns {
+		positions, complete := rec.positions(pat)
+		if !complete {
+			return nil, false
+		}
+		n := int(kwLen[pat])
+		for _, occStart := range positions {
+			start := int(occStart) + n - maxWidth - 1
+			if start < 0 {
+				start = 0
+			}
+			end := int(occStart) + maxWidth + 1
+			if end > bufLen {
+				end = bufLen
+			}
+			spans = append(spans, [2]int{start, end})
+		}
+	}
+	if len(spans) == 0 {
+		return nil, true
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	merged := spans[:1]
+	for _, sp := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if sp[0] <= last[1] {
+			if sp[1] > last[1] {
+				last[1] = sp[1]
+			}
+		} else {
+			merged = append(merged, sp)
+		}
+	}
+	total := 0
+	for _, w := range merged {
+		total += w[1] - w[0]
+	}
+	if total*4 >= bufLen*3 {
+		return nil, true
+	}
+	return merged, true
+}
+
+// windowMinFragment is the smallest fragment worth windowing: below it a
+// single full-fragment pass beats window bookkeeping.
+const windowMinFragment = 16 << 10

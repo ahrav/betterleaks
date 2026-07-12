@@ -202,6 +202,14 @@ func (p *trigramPrefilter) releaseState(st *trigramScanState) {
 // distinct keyword found via mark(pattern), called exactly once per
 // distinct pattern.
 func (p *trigramPrefilter) collectPatterns(input []byte, mark func(pattern uint32)) {
+	p.collectPatternsRec(input, nil, mark)
+}
+
+// collectPatternsRec is collectPatterns with optional occurrence recording:
+// when rec is non-nil, tracked patterns keep verifying past first find so
+// every occurrence position is captured (until the recorder's cap trips,
+// after which the pattern reverts to the dedupe shortcut).
+func (p *trigramPrefilter) collectPatternsRec(input []byte, rec *occRecorder, mark func(pattern uint32)) {
 	if len(input) < 3 {
 		return
 	}
@@ -212,7 +220,7 @@ func (p *trigramPrefilter) collectPatterns(input []byte, mark func(pattern uint3
 		tri |= uint32(input[i+2]) << 16
 		h := trigramHash(tri)
 		if p.bitmap[h>>3]&(1<<(h&7)) != 0 {
-			p.verify(input, i, tri, st, mark)
+			p.verify(input, i, tri, st, rec, mark)
 		}
 		tri >>= 8
 	}
@@ -223,7 +231,7 @@ func (p *trigramPrefilter) collectPatterns(input []byte, mark func(pattern uint3
 // its keywords anchored at position i. Found patterns are marked once;
 // when a bit's keyword set completes, the bit is cleared so subsequent
 // occurrences take the miss path.
-func (p *trigramPrefilter) verify(input []byte, i int, tri uint32, st *trigramScanState, mark func(pattern uint32)) {
+func (p *trigramPrefilter) verify(input []byte, i int, tri uint32, st *trigramScanState, rec *occRecorder, mark func(pattern uint32)) {
 	slot := trigramHash(tri) & p.tableMask
 	for {
 		s := p.table[slot]
@@ -236,10 +244,27 @@ func (p *trigramPrefilter) verify(input []byte, i int, tri uint32, st *trigramSc
 			}
 			for _, e := range p.entries[s.start:s.end] {
 				start := i - int(e.offset)
-				if !st.seen(e.pattern) && start >= 0 && len(input)-start >= len(e.kw) &&
-					string(input[start:start+len(e.kw)]) == e.kw {
+				if start < 0 || len(input)-start < len(e.kw) {
+					continue
+				}
+				seen := st.seen(e.pattern)
+				wants := rec != nil && rec.wants(e.pattern)
+				if seen && !wants {
+					continue
+				}
+				if string(input[start:start+len(e.kw)]) != e.kw {
+					continue
+				}
+				if !seen {
 					st.seenEpoch[e.pattern] = st.epoch
 					mark(e.pattern)
+					if !wants {
+						st.remaining[s.bitIdx]--
+					}
+				}
+				if wants && !rec.record(e.pattern, int32(start)) {
+					// Overflow transition: the pattern is done reporting;
+					// release its share of the bit's remaining count.
 					st.remaining[s.bitIdx]--
 				}
 			}
@@ -252,7 +277,7 @@ func (p *trigramPrefilter) verify(input []byte, i int, tri uint32, st *trigramSc
 // verifySrc is verify for the fused lowering scan: anchored keyword
 // comparison reading src through the lowerByte table, since dst is only
 // lowered up to the current window.
-func (p *trigramPrefilter) verifySrc(src string, i int, tri uint32, st *trigramScanState, mark func(pattern uint32)) {
+func (p *trigramPrefilter) verifySrc(src string, i int, tri uint32, st *trigramScanState, rec *occRecorder, mark func(pattern uint32)) {
 	slot := trigramHash(tri) & p.tableMask
 	for {
 		s := p.table[slot]
@@ -266,7 +291,12 @@ func (p *trigramPrefilter) verifySrc(src string, i int, tri uint32, st *trigramS
 		bucket:
 			for _, e := range p.entries[s.start:s.end] {
 				start := i - int(e.offset)
-				if st.seen(e.pattern) || start < 0 || len(src)-start < len(e.kw) {
+				if start < 0 || len(src)-start < len(e.kw) {
+					continue
+				}
+				seen := st.seen(e.pattern)
+				wants := rec != nil && rec.wants(e.pattern)
+				if seen && !wants {
 					continue
 				}
 				// The anchor window [i,i+3) is already known equal;
@@ -279,9 +309,16 @@ func (p *trigramPrefilter) verifySrc(src string, i int, tri uint32, st *trigramS
 						continue bucket
 					}
 				}
-				st.seenEpoch[e.pattern] = st.epoch
-				mark(e.pattern)
-				st.remaining[s.bitIdx]--
+				if !seen {
+					st.seenEpoch[e.pattern] = st.epoch
+					mark(e.pattern)
+					if !wants {
+						st.remaining[s.bitIdx]--
+					}
+				}
+				if wants && !rec.record(e.pattern, int32(start)) {
+					st.remaining[s.bitIdx]--
+				}
 			}
 			return
 		}
@@ -302,6 +339,12 @@ func (p *trigramPrefilter) verifySrc(src string, i int, tri uint32, st *trigramS
 // word), so the probes are independent and pipeline freely — no serial
 // dependency chain like a rolling hash or an automaton walk.
 func (p *trigramPrefilter) collectPatternsLowering(dst []byte, src string, mark func(pattern uint32)) {
+	p.collectPatternsLoweringRec(dst, src, nil, mark)
+}
+
+// collectPatternsLoweringRec is collectPatternsLowering with optional
+// occurrence recording (see collectPatternsRec).
+func (p *trigramPrefilter) collectPatternsLoweringRec(dst []byte, src string, rec *occRecorder, mark func(pattern uint32)) {
 	n := len(src)
 	if n < 8 {
 		for i := 0; i < n; i++ {
@@ -315,7 +358,7 @@ func (p *trigramPrefilter) collectPatternsLowering(dst []byte, src string, mark 
 			tri := uint32(dst[i]) | uint32(dst[i+1])<<8 | uint32(dst[i+2])<<16
 			h := trigramHash(tri)
 			if p.bitmap[h>>3]&(1<<(h&7)) != 0 {
-				p.verifySrc(src, i, tri, st, mark)
+				p.verifySrc(src, i, tri, st, rec, mark)
 			}
 		}
 		p.releaseState(st)
@@ -332,7 +375,7 @@ func (p *trigramPrefilter) collectPatternsLowering(dst []byte, src string, mark 
 	for i+16 <= n {
 		next := swarLower(leUint64(src[i+8:]))
 		putLEUint64(dst[i+8:], next)
-		p.testWindows(src, i, w, next, st, mark)
+		p.testWindows(src, i, w, next, st, rec, mark)
 		w = next
 		i += 8
 	}
@@ -345,7 +388,7 @@ func (p *trigramPrefilter) collectPatternsLowering(dst []byte, src string, mark 
 		tri := uint32(dst[i]) | uint32(dst[i+1])<<8 | uint32(dst[i+2])<<16
 		h := trigramHash(tri)
 		if p.bitmap[h>>3]&(1<<(h&7)) != 0 {
-			p.verifySrc(src, i, tri, st, mark)
+			p.verifySrc(src, i, tri, st, rec, mark)
 		}
 	}
 	p.releaseState(st)
@@ -358,7 +401,7 @@ func (p *trigramPrefilter) collectPatternsLowering(dst []byte, src string, mark 
 // free block (the multiplies pipeline), then eight predictable-untaken
 // branch tests follow. bitmap is passed by pointer so the compiler hoists
 // the base address once.
-func (p *trigramPrefilter) testWindows(src string, base int, w, next uint64, st *trigramScanState, mark func(pattern uint32)) {
+func (p *trigramPrefilter) testWindows(src string, base int, w, next uint64, st *trigramScanState, rec *occRecorder, mark func(pattern uint32)) {
 	bm := &p.bitmap
 	hi := w>>48 | next<<16
 
@@ -381,28 +424,28 @@ func (p *trigramPrefilter) testWindows(src string, base int, w, next uint64, st 
 	h7 := trigramHash(t7)
 
 	if bm[h0>>3]&(1<<(h0&7)) != 0 {
-		p.verifySrc(src, base+0, t0, st, mark)
+		p.verifySrc(src, base+0, t0, st, rec, mark)
 	}
 	if bm[h1>>3]&(1<<(h1&7)) != 0 {
-		p.verifySrc(src, base+1, t1, st, mark)
+		p.verifySrc(src, base+1, t1, st, rec, mark)
 	}
 	if bm[h2>>3]&(1<<(h2&7)) != 0 {
-		p.verifySrc(src, base+2, t2, st, mark)
+		p.verifySrc(src, base+2, t2, st, rec, mark)
 	}
 	if bm[h3>>3]&(1<<(h3&7)) != 0 {
-		p.verifySrc(src, base+3, t3, st, mark)
+		p.verifySrc(src, base+3, t3, st, rec, mark)
 	}
 	if bm[h4>>3]&(1<<(h4&7)) != 0 {
-		p.verifySrc(src, base+4, t4, st, mark)
+		p.verifySrc(src, base+4, t4, st, rec, mark)
 	}
 	if bm[h5>>3]&(1<<(h5&7)) != 0 {
-		p.verifySrc(src, base+5, t5, st, mark)
+		p.verifySrc(src, base+5, t5, st, rec, mark)
 	}
 	if bm[h6>>3]&(1<<(h6&7)) != 0 {
-		p.verifySrc(src, base+6, t6, st, mark)
+		p.verifySrc(src, base+6, t6, st, rec, mark)
 	}
 	if bm[h7>>3]&(1<<(h7&7)) != 0 {
-		p.verifySrc(src, base+7, t7, st, mark)
+		p.verifySrc(src, base+7, t7, st, rec, mark)
 	}
 }
 

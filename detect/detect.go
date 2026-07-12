@@ -178,6 +178,17 @@ type Detector struct {
 	// windowingDisabled turns off hit-window verification globally
 	// (BETTERLEAKS_NO_WINDOW=1); windows are on by default in the lab.
 	windowingDisabled bool
+	// windowTrackPatterns[pattern] is true when the keyword pattern maps to
+	// at least one window-eligible rule, so the trigram scan records its
+	// occurrence positions for window construction.
+	windowTrackPatterns []bool
+	// windowPatternsByRank[rank] lists the keyword pattern indices whose
+	// occurrences define rank's windows (inverse of prefilterRuleRanks,
+	// restricted to window-eligible ranks).
+	windowPatternsByRank [][]uint32
+	// windowKwLenByPattern[pattern] is the keyword's byte length, for
+	// computing occurrence end offsets from recorded starts.
+	windowKwLenByPattern []int32
 	// candidatePool recycles the per-fragment candidate-collection scratch.
 	candidatePool sync.Pool
 
@@ -331,6 +342,12 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 	// so the per-fragment hot loop never touches the ruleRank map or allocates.
 	numRules := len(d.rulesBySpecificity)
 	d.prefilterRuleRanks = make([][]int, len(d.prefilterRules))
+	d.windowTrackPatterns = make([]bool, len(keywords))
+	d.windowPatternsByRank = make([][]uint32, len(d.rulesBySpecificity))
+	d.windowKwLenByPattern = make([]int32, len(keywords))
+	for pi, kw := range keywords {
+		d.windowKwLenByPattern[pi] = int32(len(kw))
+	}
 	for i, ruleIDs := range d.prefilterRules {
 		ranks := make([]int, 0, len(ruleIDs))
 		for _, ruleID := range ruleIDs {
@@ -339,6 +356,20 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 			}
 		}
 		d.prefilterRuleRanks[i] = ranks
+	}
+	// Invert keyword pattern -> window-eligible ranks so the trigram scan
+	// knows which patterns' occurrence positions to record, and window
+	// construction knows which recorded lists feed each rank. A rank's
+	// windows need occurrences of ALL its keywords, so windowPatternsByRank
+	// only includes patterns whose keyword belongs to that rule.
+	for pattern, ranks := range d.prefilterRuleRanks {
+		for _, rank := range ranks {
+			if !d.windowPlanByRank[rank].valid() {
+				continue
+			}
+			d.windowTrackPatterns[pattern] = true
+			d.windowPatternsByRank[rank] = append(d.windowPatternsByRank[rank], uint32(pattern))
+		}
 	}
 	d.noKeywordRuleRanks = make([]int, 0, len(cfg.NoKeywordRules))
 	for _, ruleID := range cfg.NoKeywordRules {
@@ -822,11 +853,18 @@ ScanLoop:
 			}
 			var lowerBufPtr *[]byte
 			var lowerBuf []byte
+			var occRec *occRecorder
 			if d.prefilterMode == prefilterTrigram {
 				// Fused pass: lowercase into the pooled buffer while
-				// scanning trigrams, replacing asciiLower + walk.
+				// scanning trigrams, replacing asciiLower + walk. For
+				// fragments large enough to be windowed, record keyword
+				// occurrence positions so window construction can skip
+				// bytes.Index rediscovery.
 				lowerBufPtr, lowerBuf = getLowerBufRaw(len(currentRaw))
-				d.prefilterTri.collectPatternsLowering(lowerBuf, currentRaw, markPattern)
+				if !d.windowingDisabled && len(currentRaw) >= windowMinFragment {
+					occRec = getOccRecorder(len(d.windowTrackPatterns), d.windowTrackPatterns)
+				}
+				d.prefilterTri.collectPatternsLoweringRec(lowerBuf, currentRaw, occRec, markPattern)
 			} else {
 				lowerBufPtr, lowerBuf = getLowerBuf(currentRaw)
 				switch d.prefilterMode {
@@ -896,10 +934,17 @@ ScanLoop:
 					// Windowing pays only when the avoided scan bytes exceed
 					// the occurrence-discovery cost; small fragments scan
 					// faster in one pass than through window bookkeeping.
-					const windowMinFragment = 16 << 10
 					if windowsOK && len(lowerBuf) >= windowMinFragment && d.windowPlanByRank[rank].valid() {
 						if w := d.windowPlanByRank[rank].width(passMaxLine); w*8 < len(lowerBuf) {
-							windows = ruleWindows(lowerBuf, d.windowKeywordsByRank[rank], w)
+							usedRec := false
+							if occRec != nil {
+								if ws, ok := ruleWindowsFromPositions(occRec, d.windowPatternsByRank[rank], d.windowKwLenByPattern, len(lowerBuf), w); ok {
+									windows, usedRec = ws, true
+								}
+							}
+							if !usedRec {
+								windows = ruleWindows(lowerBuf, d.windowKeywordsByRank[rank], w)
+							}
 						}
 					}
 					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings, gateFacts, windows)...)
@@ -911,6 +956,9 @@ ScanLoop:
 			scratch.reset()
 			d.candidatePool.Put(scratch)
 			putLowerBuf(lowerBufPtr)
+			if occRec != nil {
+				putOccRecorder(occRec)
+			}
 			if cancelled {
 				break ScanLoop
 			}

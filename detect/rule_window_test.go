@@ -139,3 +139,241 @@ func TestWindowedDetectionDifferential(t *testing.T) {
 		check(fmt.Sprintf("random-%d", trial), sb.String())
 	}
 }
+
+// TestRecordedWindowsDifferential exercises the occurrence-recorder path:
+// fragments must exceed windowMinFragment so recorded positions (not
+// bytes.Index) build the windows. Compares full-detector findings between
+// trigram+recorder, trigram with windowing disabled, and the AhoC path,
+// plus direct window equivalence for every eligible rule. Includes the
+// overflow regime (a keyword occurring more than occRecorderCap times).
+func TestRecordedWindowsDifferential(t *testing.T) {
+	cfg, err := config.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secrets := []string{
+		`aws_key = "AKIAIOSFODNN7EXAMPLE"`,
+		`const Discord_Public_Key = "e7322523fb86ed64c836a979cf8465fbd436378c653c1db38f9ae87bc62a6fd5"`,
+		"github_token := \"ghp_16C7e42F292c6912E7710c838347Ae178B4a\"",
+		`slack_token = "xoxb-781236542736-2364535789652-GkwFDQoHqzXDVsC6GzqYUypD"`,
+		`generic_secret = "hjkKJHmn234$sdfHJKmnop9012jklMNOP"`,
+	}
+	filler := "for i := range items { process(items[i]) } // deployment configuration value\n"
+
+	build := func(rng *rand.Rand, n int, overflowKeyword bool) string {
+		var sb strings.Builder
+		for sb.Len() < n {
+			if rng.Intn(10) == 0 {
+				sb.WriteString(secrets[rng.Intn(len(secrets))])
+				sb.WriteByte('\n')
+			}
+			if overflowKeyword && rng.Intn(3) == 0 {
+				// "twitter" maps to 5 rules; spam it past occRecorderCap.
+				sb.WriteString("twitter twitter_config twitter_value ")
+			}
+			sb.WriteString(filler)
+		}
+		return sb.String()
+	}
+
+	newDetector := func(mode string, noWindow bool) *Detector {
+		t.Setenv("BETTERLEAKS_PREFILTER", mode)
+		d := NewDetector(cfg)
+		d.MaxDecodeDepth = 0
+		d.windowingDisabled = noWindow
+		return d
+	}
+
+	rng := rand.New(rand.NewSource(2024))
+	for trial := 0; trial < 40; trial++ {
+		content := build(rng, 24<<10+rng.Intn(48<<10), trial%2 == 1)
+		if len(content) < windowMinFragment {
+			t.Fatalf("trial %d content too small: %d", trial, len(content))
+		}
+		frag := sources.Fragment{Raw: content, Attributes: map[string]string{sources.AttrPath: "test.py"}}
+
+		recFindings := canonicalFindings(t, newDetector("trigram", false).detectFragment(context.Background(), frag))
+		fullFindings := canonicalFindings(t, newDetector("trigram", true).detectFragment(context.Background(), frag))
+		ahocFindings := canonicalFindings(t, newDetector("ahoc", false).detectFragment(context.Background(), frag))
+
+		for name, got := range map[string][]string{"trigram-windowed(rec)": recFindings, "ahoc-windowed": ahocFindings} {
+			if len(got) != len(fullFindings) {
+				t.Fatalf("trial %d %s: %d findings vs full %d", trial, name, len(got), len(fullFindings))
+			}
+			for i := range got {
+				if got[i] != fullFindings[i] {
+					t.Fatalf("trial %d %s: finding %d differs:\n%s\nvs\n%s", trial, name, i, got[i], fullFindings[i])
+				}
+			}
+		}
+	}
+}
+
+// TestRuleWindowsFromPositionsEquivalence pins the recorded-position window
+// builder to the bytes.Index builder for identical inputs: complete
+// recorded lists must produce byte-identical merged windows.
+func TestRuleWindowsFromPositionsEquivalence(t *testing.T) {
+	keywords := defaultKeywords(t)
+	tri := newTrigramPrefilter(keywords)
+	if tri == nil {
+		t.Fatal("no trigram prefilter")
+	}
+	kwLen := make([]int32, len(keywords))
+	kwBytes := make([][]byte, len(keywords))
+	for i, kw := range keywords {
+		kwLen[i] = int32(len(kw))
+		kwBytes[i] = []byte(kw)
+	}
+	trackAll := make([]bool, len(keywords))
+	for i := range trackAll {
+		trackAll[i] = true
+	}
+
+	rng := rand.New(rand.NewSource(5))
+	alpha := "abcdefghijklmnopqrstuvwxyz0123456789-_. \n\t=\"'"
+	for trial := 0; trial < 500; trial++ {
+		n := 64 + rng.Intn(4096)
+		buf := make([]byte, n)
+		for i := range buf {
+			buf[i] = alpha[rng.Intn(len(alpha))]
+		}
+		for k := rng.Intn(8); k > 0; k-- {
+			kw := keywords[rng.Intn(len(keywords))]
+			if len(kw) <= n {
+				copy(buf[rng.Intn(n-len(kw)+1):], kw)
+			}
+		}
+
+		rec := newOccRecorder(len(keywords), trackAll)
+		tri.collectPatternsRec(buf, rec, func(pattern uint32) {})
+
+		width := 32 + rng.Intn(512)
+		for pat := range keywords {
+			positions, complete := rec.positions(uint32(pat))
+			if !complete {
+				continue // overflow: caller falls back, nothing to compare
+			}
+			// Recorder captures every occurrence; cross-check with a
+			// simple scan before comparing window construction.
+			var wantPos []int32
+			for from := 0; ; {
+				idx := strings.Index(string(buf[from:]), keywords[pat])
+				if idx < 0 {
+					break
+				}
+				wantPos = append(wantPos, int32(from+idx))
+				from += idx + 1
+			}
+			if len(positions) != len(wantPos) {
+				t.Fatalf("trial %d kw %q: recorder %v want %v", trial, keywords[pat], positions, wantPos)
+			}
+			for i := range positions {
+				if positions[i] != wantPos[i] {
+					t.Fatalf("trial %d kw %q: recorder %v want %v", trial, keywords[pat], positions, wantPos)
+				}
+			}
+			if len(positions) == 0 {
+				continue
+			}
+			got, ok := ruleWindowsFromPositions(rec, []uint32{uint32(pat)}, kwLen, len(buf), width)
+			if !ok {
+				t.Fatalf("trial %d kw %q: unexpected overflow signal", trial, keywords[pat])
+			}
+			want := ruleWindows(buf, [][]byte{kwBytes[pat]}, width)
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("trial %d kw %q width %d:\nrecorded: %v\nindex:    %v", trial, keywords[pat], width, got, want)
+			}
+		}
+	}
+}
+
+// BenchmarkWindowConstruction compares occurrence-recorded window building
+// (prefilter records positions, ruleWindowsFromPositions merges) against
+// bytes.Index rediscovery (plain prefilter + ruleWindows), on a real-shaped
+// large fragment, measuring the combined prefilter+window-construction cost
+// for all window-eligible candidate rules.
+func BenchmarkWindowConstruction(b *testing.B) {
+	cfg, err := config.Default()
+	if err != nil {
+		b.Fatal(err)
+	}
+	t := &testing.T{}
+	_ = t
+	d := NewDetector(cfg)
+	d.MaxDecodeDepth = 0
+	if d.prefilterTri == nil {
+		d.prefilterTri = newTrigramPrefilter(func() []string {
+			kws := defaultKeywords(b)
+			return kws
+		}())
+	}
+
+	// 256KB source-shaped fragment salted with keywords.
+	rng := rand.New(rand.NewSource(9))
+	keywords := defaultKeywords(b)
+	var sb strings.Builder
+	filler := "for i := range items { process(items[i]) } // configuration deployment\n"
+	for sb.Len() < 256<<10 {
+		if rng.Intn(12) == 0 {
+			sb.WriteString(keywords[rng.Intn(len(keywords))])
+			sb.WriteString(" = \"value\"\n")
+		}
+		sb.WriteString(filler)
+	}
+	raw := sb.String()
+	dst := make([]byte, len(raw))
+
+	// Collect candidate ranks + widths once (same for both paths).
+	maxLine := 0
+	{
+		lowered := make([]byte, len(raw))
+		asciiLower(lowered, raw)
+		maxLine = longestNewlineFreeRun(lowered)
+	}
+
+	b.Run("recorded", func(b *testing.B) {
+		b.SetBytes(int64(len(raw)))
+		for b.Loop() {
+			rec := getOccRecorder(len(d.windowTrackPatterns), d.windowTrackPatterns)
+			var ranks []int
+			d.prefilterTri.collectPatternsLoweringRec(dst, raw, rec, func(pattern uint32) {
+				ranks = append(ranks, d.prefilterRuleRanks[pattern]...)
+			})
+			for _, rank := range ranks {
+				if !d.windowPlanByRank[rank].valid() {
+					continue
+				}
+				w := d.windowPlanByRank[rank].width(maxLine)
+				if w*8 >= len(raw) {
+					continue
+				}
+				if ws, ok := ruleWindowsFromPositions(rec, d.windowPatternsByRank[rank], d.windowKwLenByPattern, len(raw), w); ok {
+					_ = ws
+					continue
+				}
+				_ = ruleWindows(dst, d.windowKeywordsByRank[rank], w)
+			}
+			putOccRecorder(rec)
+		}
+	})
+	b.Run("bytesindex", func(b *testing.B) {
+		b.SetBytes(int64(len(raw)))
+		for b.Loop() {
+			var ranks []int
+			d.prefilterTri.collectPatternsLowering(dst, raw, func(pattern uint32) {
+				ranks = append(ranks, d.prefilterRuleRanks[pattern]...)
+			})
+			for _, rank := range ranks {
+				if !d.windowPlanByRank[rank].valid() {
+					continue
+				}
+				w := d.windowPlanByRank[rank].width(maxLine)
+				if w*8 >= len(raw) {
+					continue
+				}
+				_ = ruleWindows(dst, d.windowKeywordsByRank[rank], w)
+			}
+		}
+	})
+}

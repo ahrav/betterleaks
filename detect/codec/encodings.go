@@ -10,6 +10,11 @@ var (
 	isB64Char    [256]bool // 0-9, A-Z, a-z, _, /, +, -  (matches [\w\/+-])
 	isB64NotHex  [256]bool // b64 chars that are NOT hex (G-Z, g-z, _, /, +, -)
 	isWhitespace [256]bool // space, tab, \n, \r, etc.
+	// isBoring marks bytes that can never begin an encoding match: not a
+	// b64/hex run byte and not a '%' or '\' anchor. The scanner skips
+	// runs of these with a tight one-table loop instead of re-running
+	// the full dispatch ladder per byte.
+	isBoring [256]bool
 )
 
 func init() {
@@ -48,6 +53,13 @@ func init() {
 	isWhitespace['\r'] = true
 	isWhitespace['\f'] = true
 	isWhitespace['\v'] = true
+
+	// Interesting bytes are exactly those the dispatch ladder below can
+	// act on: b64/hex run bytes (includes 'U' for U+XXXX) plus the '%'
+	// and '\' anchors. Everything else is boring.
+	for c := 0; c < 256; c++ {
+		isBoring[c] = !isB64Char[c] && c != '%' && c != '\\'
+	}
 }
 
 var (
@@ -145,6 +157,16 @@ func findEncodingMatches(data string) []encodingMatch {
 
 	for i < n {
 		c := data[i]
+
+		// Fast path: skip runs of bytes that cannot start any encoding.
+		// One load + one predictable branch per byte, no dispatch ladder.
+		if boringSkipEnabled && isBoring[c] {
+			i++
+			for i < n && isBoring[data[i]] {
+				i++
+			}
+			continue
+		}
 
 		// --- Percent encoding: %XX ---
 		if c == '%' && i+2 < n && isHexChar[data[i+1]] && isHexChar[data[i+2]] {
@@ -366,3 +388,7 @@ func findEncodingMatches(data string) []encodingMatch {
 
 	return filtered
 }
+
+// boringSkipEnabled gates the boring-byte fast path; benchmarks flip it to
+// measure the skip's contribution.
+var boringSkipEnabled = true

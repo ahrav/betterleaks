@@ -3,11 +3,15 @@ package sources
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/betterleaks/betterleaks/logging"
 	"github.com/fatih/semgroup"
@@ -17,6 +21,7 @@ import (
 type ScanTarget struct {
 	Path    string
 	Symlink string
+	Size    int64
 }
 
 // Files is a source for yielding fragments from a collection of files
@@ -27,6 +32,9 @@ type Files struct {
 	Path            string
 	Sema            *semgroup.Group
 	MaxArchiveDepth int
+	// FileScan enables the explicitly experimental filesystem scanner
+	// tournament. Nil preserves the production scanner path.
+	FileScan *FileScanConfig
 }
 
 // scanTargets yields scan targets to a callback func
@@ -44,8 +52,14 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 			logger.Warn().Err(err).Msg("skipping")
 			return nil
 		}
-
+		metadataStart := time.Time{}
+		if s.fileScanMetrics() != nil {
+			metadataStart = time.Now()
+		}
 		info, err := d.Info()
+		if !metadataStart.IsZero() {
+			s.fileScanMetrics().RecordPhase(FileScanPhaseMetadata, 0, err, time.Since(metadataStart))
+		}
 		if err != nil {
 			if d.IsDir() {
 				logger.Error().Err(err).Msg("skipping directory: could not get info")
@@ -54,6 +68,7 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 			logger.Error().Err(err).Msg("skipping file: could not get info")
 			return nil
 		}
+		scanTarget.Size = info.Size()
 
 		if !d.IsDir() {
 			// Empty; nothing to do here.
@@ -83,13 +98,20 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 				logger.Error().Err(err).Msg("skipping symlink: could not evaluate")
 				return nil
 			}
-			if realPathFileInfo, _ := os.Stat(realPath); realPathFileInfo.IsDir() {
+			realPathFileInfo, statErr := os.Stat(realPath)
+			if statErr != nil {
+				logger.Error().Err(statErr).Msg("skipping symlink: could not stat target")
+				s.fileScanMetrics().RecordLedger("symlink_stat_error", path, statErr.Error())
+				return nil
+			}
+			if realPathFileInfo.IsDir() {
 				logger.Debug().Str("target", realPath).Msgf("skipping symlink: target is directory")
 				return nil
 			}
 			scanTarget = ScanTarget{
 				Path:    realPath,
 				Symlink: path,
+				Size:    realPathFileInfo.Size(),
 			}
 		}
 
@@ -107,56 +129,396 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 			return nil
 		}
 
+		s.fileScanMetrics().RecordTarget(s.Path, scanTarget)
 		return yield(scanTarget, nil)
 	})
 }
 
 // Fragments yields fragments from files discovered under the path
 func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
-	var wg sync.WaitGroup
+	var (
+		cfg        *FileScanConfig
+		metrics    *FileScanMetrics
+		backend    *contentBackend
+		dispatcher *fileScanDispatcher
+	)
+	if s.FileScan != nil {
+		normalized := s.FileScan.Normalize()
+		cfg = &normalized
+		metrics = normalized.Metrics
+		var err error
+		backend, err = newContentBackend(ctx, s.Path, normalized)
+		if err != nil {
+			return err
+		}
+		defer backend.Close()
+		if !normalized.InlineDetector {
+			dispatcher = newFileScanDispatcher(ctx, normalized.DetectorWorkers, metrics, yield)
+		}
+	}
 
-	scanFile := func(scanTarget ScanTarget) {
-		defer wg.Done()
+	group := s.Sema
+	if cfg != nil || group == nil {
+		workers := max(40, runtime.NumCPU()*2)
+		if cfg != nil {
+			workers = cfg.ActiveFiles
+		}
+		group = semgroup.NewGroup(ctx, int64(workers))
+	}
+
+	scanFile := func(scanTarget ScanTarget) error {
 		logger := logging.With().Str("path", scanTarget.Path).Logger()
 		logger.Trace().Msg("scanning path")
+		local := metrics.NewLocal()
+		if metrics != nil {
+			metrics.AddGauge(FileScanGaugeActiveFiles, 1)
+			defer metrics.AddGauge(FileScanGaugeActiveFiles, -1)
+			defer metrics.MergeLocal(local)
+		}
 
-		f, err := os.Open(scanTarget.Path)
+		openTimer := local.StartPhase(FileScanPhaseOpen)
+		var (
+			opened *openedContent
+			err    error
+		)
+		if backend == nil {
+			var file *os.File
+			file, err = os.Open(scanTarget.Path)
+			if err == nil {
+				opened = &openedContent{
+					Reader:  file,
+					Backend: FileScanBackendBaseline,
+					close:   file.Close,
+				}
+			}
+		} else {
+			opened, err = backend.Open(ctx, scanTarget)
+		}
+		openTimer.Done(0, err)
 		if err != nil {
+			metrics.RecordLedger("open_error", scanTarget.Path, err.Error())
 			if os.IsPermission(err) {
 				logger.Warn().Msg("skipping file: permission denied")
 			}
-			return
+			if cfg != nil {
+				return err
+			}
+			return nil
 		}
+		if opened.Fallback != "" {
+			metrics.RecordFallback(opened.Fallback)
+		}
+		tracker := &fileScanReadTracker{}
+		content := instrumentFileScanReader(opened.Reader, local, tracker)
 
 		// Convert this to a file source
 		file := File{
-			Content:         f,
+			Content:         content,
 			Path:            scanTarget.Path,
 			Symlink:         scanTarget.Symlink,
 			ShouldSkip:      s.ShouldSkip,
 			MaxArchiveDepth: s.MaxArchiveDepth,
+			fileScanRoot:    s.Path,
+			fileScanMetrics: metrics,
+			fileScanLocal:   local,
 		}
 
-		_ = file.Fragments(ctx, yield)
-		// Avoiding a defer in a hot loop
-		_ = f.Close()
+		fileYield := yield
+		if dispatcher != nil {
+			fileYield = dispatcher.callback(local)
+		} else if local != nil {
+			fileYield = measuredFileScanYield(local, yield)
+		}
+		scanErr := file.Fragments(ctx, fileYield)
+		if scanErr != nil {
+			metrics.RecordLedger("read_error", scanTarget.Path, scanErr.Error())
+		}
+		closeTimer := local.StartPhase(FileScanPhaseClose)
+		closeErr := opened.Close()
+		closeTimer.Done(0, closeErr)
+		if closeErr != nil {
+			metrics.RecordLedger("close_error", scanTarget.Path, closeErr.Error())
+		}
+		metrics.RecordBackend(string(opened.Backend), tracker.bytes.Load())
+		if cfg != nil {
+			return errors.Join(scanErr, closeErr)
+		}
+		return nil
 	}
 
-	err := s.scanTargetsParallel(ctx, func(scanTarget ScanTarget) {
-		wg.Add(1)
-		s.Sema.Go(func() error {
-			scanFile(scanTarget)
+	var (
+		scanErrorsMu sync.Mutex
+		scanErrors   []fileScanTaskError
+		legacyWG     sync.WaitGroup
+	)
+	schedule := func(scanTarget ScanTarget) {
+		if cfg == nil {
+			legacyWG.Add(1)
+			group.Go(func() error {
+				defer legacyWG.Done()
+				return scanFile(scanTarget)
+			})
+			return
+		}
+		group.Go(func() error {
+			err := scanFile(scanTarget)
+			if cfg == nil || err == nil {
+				return err
+			}
+			scanErrorsMu.Lock()
+			scanErrors = append(scanErrors, fileScanTaskError{
+				path: canonicalFileScanPath(s.Path, scanTarget.Path),
+				err:  err,
+			})
+			scanErrorsMu.Unlock()
+			// semgroup formats accumulated errors in completion order. Keep
+			// experimental errors out of that nondeterministic aggregate and
+			// join them by canonical target below.
 			return nil
 		})
-	})
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		wg.Wait()
-		return err
 	}
+	walkStart := time.Time{}
+	if metrics != nil {
+		walkStart = time.Now()
+	}
+	var walkErr error
+	if cfg != nil && cfg.Namespace == FileScanNamespaceSerial {
+		walkErr = s.scanTargets(ctx, func(scanTarget ScanTarget, err error) error {
+			if err != nil {
+				return err
+			}
+			schedule(scanTarget)
+			return nil
+		})
+	} else {
+		walkErr = s.scanTargetsParallel(ctx, schedule)
+	}
+	if !walkStart.IsZero() {
+		metrics.RecordPhase(FileScanPhaseEnumeration, 0, walkErr, time.Since(walkStart))
+	}
+	if cfg == nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			legacyWG.Wait()
+			return walkErr
+		}
+	}
+	groupErr := group.Wait()
+	scanErr := joinFileScanTaskErrors(scanErrors)
+	var dispatchErr error
+	if dispatcher != nil {
+		dispatchErr = dispatcher.Close()
+	}
+	backendErr := error(nil)
+	if backend != nil {
+		backendErr = backend.Close()
+	}
+	if ctx.Err() != nil {
+		return errors.Join(walkErr, scanErr, groupErr, dispatchErr, backendErr, ctx.Err())
+	}
+	return errors.Join(walkErr, scanErr, groupErr, dispatchErr, backendErr)
+}
+
+type fileScanTaskError struct {
+	path string
+	err  error
+}
+
+func joinFileScanTaskErrors(items []fileScanTaskError) error {
+	if len(items) == 0 {
+		return nil
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].path != items[j].path {
+			return items[i].path < items[j].path
+		}
+		return items[i].err.Error() < items[j].err.Error()
+	})
+	joined := make([]error, 0, len(items))
+	for _, item := range items {
+		joined = append(joined, item.err)
+	}
+	return errors.Join(joined...)
+}
+
+func (s *Files) fileScanMetrics() *FileScanMetrics {
+	if s == nil || s.FileScan == nil {
+		return nil
+	}
+	return s.FileScan.Metrics
+}
+
+type fileScanReadTracker struct {
+	mu    sync.Mutex
+	bytes atomic.Uint64
+}
+
+func (t *fileScanReadTracker) record(local *FileScanLocalMetrics, n int, err error, start time.Time) {
+	if n > 0 {
+		t.bytes.Add(uint64(n))
+	}
+	if local == nil {
+		return
+	}
+	t.mu.Lock()
+	local.RecordPhase(FileScanPhaseReadWait, uint64(max(n, 0)), err, time.Since(start))
+	t.mu.Unlock()
+}
+
+type fileScanMeasuredReader struct {
+	reader  io.Reader
+	local   *FileScanLocalMetrics
+	tracker *fileScanReadTracker
+}
+
+func (r *fileScanMeasuredReader) Read(p []byte) (int, error) {
+	start := time.Time{}
+	if r.local != nil {
+		start = time.Now()
+	}
+	n, err := r.reader.Read(p)
+	r.tracker.record(r.local, n, err, start)
+	return n, err
+}
+
+type fileScanMeasuredFile struct {
+	*os.File
+	local   *FileScanLocalMetrics
+	tracker *fileScanReadTracker
+}
+
+func (f *fileScanMeasuredFile) Read(p []byte) (int, error) {
+	start := time.Time{}
+	if f.local != nil {
+		start = time.Now()
+	}
+	n, err := f.File.Read(p)
+	f.tracker.record(f.local, n, err, start)
+	return n, err
+}
+
+func (f *fileScanMeasuredFile) ReadAt(p []byte, off int64) (int, error) {
+	start := time.Time{}
+	if f.local != nil {
+		start = time.Now()
+	}
+	n, err := f.File.ReadAt(p, off)
+	f.tracker.record(f.local, n, err, start)
+	return n, err
+}
+
+func instrumentFileScanReader(
+	reader io.Reader,
+	local *FileScanLocalMetrics,
+	tracker *fileScanReadTracker,
+) io.Reader {
+	if local == nil {
+		return reader
+	}
+	if file, ok := reader.(*os.File); ok {
+		return &fileScanMeasuredFile{File: file, local: local, tracker: tracker}
+	}
+	return &fileScanMeasuredReader{reader: reader, local: local, tracker: tracker}
+}
+
+func measuredFileScanYield(local *FileScanLocalMetrics, yield FragmentsFunc) FragmentsFunc {
+	return func(fragment Fragment, err error) error {
+		timer := local.StartPhase(FileScanPhaseDetector)
+		yieldErr := yield(fragment, err)
+		timer.Done(uint64(len(fragment.Raw)), yieldErr)
+		return yieldErr
+	}
+}
+
+type fileScanDispatchEvent struct {
+	fragment Fragment
+	err      error
+	local    *FileScanLocalMetrics
+	ack      chan error
+}
+
+type fileScanDispatcher struct {
+	ctx     context.Context
+	metrics *FileScanMetrics
+	yield   FragmentsFunc
+	events  chan fileScanDispatchEvent
+	wg      sync.WaitGroup
+	once    sync.Once
+}
+
+func newFileScanDispatcher(
+	ctx context.Context,
+	workers int,
+	metrics *FileScanMetrics,
+	yield FragmentsFunc,
+) *fileScanDispatcher {
+	d := &fileScanDispatcher{
+		ctx:     ctx,
+		metrics: metrics,
+		yield:   yield,
+		events:  make(chan fileScanDispatchEvent, workers),
+	}
+	d.wg.Add(workers)
+	for range workers {
+		go func() {
+			defer d.wg.Done()
+			for event := range d.events {
+				d.metrics.AddGauge("fragment_queue_depth", -1)
+				timer := event.local.StartPhase(FileScanPhaseDetector)
+				err := d.yield(event.fragment, event.err)
+				timer.Done(uint64(len(event.fragment.Raw)), err)
+				event.ack <- err
+			}
+		}()
+	}
+	return d
+}
+
+func (d *fileScanDispatcher) callback(local *FileScanLocalMetrics) FragmentsFunc {
+	ack := make(chan error, 1)
+	return func(fragment Fragment, err error) error {
+		queueStart := time.Time{}
+		if d.metrics != nil {
+			queueStart = time.Now()
+		}
+		d.metrics.AddGauge("fragment_queue_depth", 1)
+		select {
+		case <-d.ctx.Done():
+			d.metrics.AddGauge("fragment_queue_depth", -1)
+			if !queueStart.IsZero() {
+				d.metrics.RecordPhase(
+					"detector_queue",
+					uint64(len(fragment.Raw)),
+					d.ctx.Err(),
+					time.Since(queueStart),
+				)
+			}
+			return d.ctx.Err()
+		case d.events <- fileScanDispatchEvent{fragment: fragment, err: err, local: local, ack: ack}:
+			if !queueStart.IsZero() {
+				d.metrics.RecordPhase(
+					"detector_queue",
+					uint64(len(fragment.Raw)),
+					nil,
+					time.Since(queueStart),
+				)
+			}
+		}
+		// Once ownership is transferred, wait for the worker even after
+		// cancellation. The fragment and per-file metrics remain owned by the
+		// producer until this acknowledgement arrives.
+		return <-ack
+	}
+}
+
+func (d *fileScanDispatcher) Close() error {
+	d.once.Do(func() {
+		close(d.events)
+		d.wg.Wait()
+	})
+	return nil
 }
 
 // scanTargetsParallel walks the directory tree with a bounded pool of walker
@@ -164,8 +526,7 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 // goroutine. Subdirectories are pushed to a shared work queue; each walker pops
 // a directory, reads its entries, emits scan targets for files, and pushes
 // child directories back. Emission order is nondeterministic, but findings are
-// order-independent (deduplicated by content), so results are byte-identical to
-// the serial filepath.WalkDir walk.
+// compared as order-independent multisets by the tournament correctness gate.
 func (s *Files) scanTargetsParallel(ctx context.Context, emit func(ScanTarget)) error {
 	rootInfo, err := os.Lstat(s.Path)
 	if err != nil {
@@ -187,15 +548,19 @@ func (s *Files) scanTargetsParallel(ctx context.Context, emit func(ScanTarget)) 
 	}
 
 	walkers := runtime.NumCPU()
+	if s.FileScan != nil {
+		walkers = s.FileScan.Normalize().Walkers
+	}
 	var (
-		mu      sync.Mutex
-		pending []string
+		mu       sync.Mutex
+		pending  []string
 		inFlight int
-		cond    = sync.NewCond(&mu)
-		wg      sync.WaitGroup
+		cond     = sync.NewCond(&mu)
+		wg       sync.WaitGroup
 	)
 	pending = append(pending, s.Path)
 	inFlight = 1 // the root, claimed below
+	s.fileScanMetrics().SetGauge("pending_dirs", int64(len(pending)))
 
 	worker := func() {
 		defer wg.Done()
@@ -211,12 +576,14 @@ func (s *Files) scanTargetsParallel(ctx context.Context, emit func(ScanTarget)) 
 			}
 			dir := pending[len(pending)-1]
 			pending = pending[:len(pending)-1]
+			s.fileScanMetrics().SetGauge("pending_dirs", int64(len(pending)))
 			mu.Unlock()
 
 			children := s.walkDir(ctx, dir, emit)
 
 			mu.Lock()
 			pending = append(pending, children...)
+			s.fileScanMetrics().SetGauge("pending_dirs", int64(len(pending)))
 			inFlight += len(children)
 			inFlight-- // this dir is done
 			mu.Unlock()
@@ -271,9 +638,17 @@ func (s *Files) walkDir(ctx context.Context, dir string, emit func(ScanTarget)) 
 // should be scanned.
 func (s *Files) emitTarget(ctx context.Context, path string, d fs.DirEntry, emit func(ScanTarget)) {
 	logger := logging.With().Str("path", path).Logger()
+	metadataStart := time.Time{}
+	if s.fileScanMetrics() != nil {
+		metadataStart = time.Now()
+	}
 	info, err := d.Info()
+	if !metadataStart.IsZero() {
+		s.fileScanMetrics().RecordPhase(FileScanPhaseMetadata, 0, err, time.Since(metadataStart))
+	}
 	if err != nil {
 		logger.Error().Err(err).Msg("skipping file: could not get info")
+		s.fileScanMetrics().RecordLedger("metadata_error", path, err.Error())
 		return
 	}
 
@@ -286,7 +661,7 @@ func (s *Files) emitTarget(ctx context.Context, path string, d fs.DirEntry, emit
 		return
 	}
 
-	scanTarget := ScanTarget{Path: path}
+	scanTarget := ScanTarget{Path: path, Size: info.Size()}
 	if d.Type() == fs.ModeSymlink {
 		if !s.FollowSymlinks {
 			return
@@ -296,14 +671,21 @@ func (s *Files) emitTarget(ctx context.Context, path string, d fs.DirEntry, emit
 			logger.Error().Err(err).Msg("skipping symlink: could not evaluate")
 			return
 		}
-		if realPathFileInfo, _ := os.Stat(realPath); realPathFileInfo != nil && realPathFileInfo.IsDir() {
+		realPathFileInfo, statErr := os.Stat(realPath)
+		if statErr != nil {
+			logger.Error().Err(statErr).Msg("skipping symlink: could not stat target")
+			s.fileScanMetrics().RecordLedger("symlink_stat_error", path, statErr.Error())
 			return
 		}
-		scanTarget = ScanTarget{Path: realPath, Symlink: path}
+		if realPathFileInfo.IsDir() {
+			return
+		}
+		scanTarget = ScanTarget{Path: realPath, Symlink: path, Size: realPathFileInfo.Size()}
 	}
 
 	if shouldSkipPath(s.ShouldSkip, path) {
 		return
 	}
+	s.fileScanMetrics().RecordTarget(s.Path, scanTarget)
 	emit(scanTarget)
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,10 @@ func runDirectory(cmd *cobra.Command, args []string) {
 
 	// start timer
 	start := time.Now()
+	fileScanConfig, fileScanErr := fileScanConfigFromFlags(cmd)
+	if fileScanErr != nil {
+		logging.Fatal().Err(fileScanErr).Msg("invalid filesystem scanner experiment")
+	}
 	followSymlinks := mustGetBoolFlag(cmd, "follow-symlinks")
 	maxArchiveDepth := mustGetIntFlag(cmd, "max-archive-depth")
 	maxTargetMegaBytes := mustGetIntFlag(cmd, "max-target-megabytes")
@@ -67,17 +72,28 @@ func runDirectory(cmd *cobra.Command, args []string) {
 			Path:            source,
 			Sema:            detector.Sema,
 			MaxArchiveDepth: maxArchiveDepth,
+			FileScan:        fileScanConfig,
 		}
 
 		var findings []report.Finding
 		for result := range detector.Run(cmd.Context(), s) {
 			if result.Err != nil {
 				scanErrs = append(scanErrs, result.Err)
+				if fileScanConfig != nil {
+					fileScanConfig.Metrics.RecordLedger("detector_error", "", result.Err.Error())
+				}
 				logging.Error().Err(result.Err).Msg("error scanning source")
 				continue
 			}
 
 			findings = append(findings, result.Finding)
+			if fileScanConfig != nil {
+				canonical, err := json.Marshal(result.Finding)
+				if err != nil {
+					logging.Fatal().Err(err).Msg("canonicalize filesystem scan finding")
+				}
+				fileScanConfig.Metrics.RecordFinding(canonical)
+			}
 			if verbose {
 				if detector.LegacyPrint {
 					result.Finding.PrintLegacy(noColor, uint(redact))
@@ -101,6 +117,9 @@ func runDirectory(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	if err := writeFileScanMetrics(fileScanConfig); err != nil {
+		logging.Fatal().Err(err).Msg("write filesystem scan metrics")
+	}
 	findingSummaryAndExit(lastDetector, allFindings, exitCode, start, scanErr)
 }
 

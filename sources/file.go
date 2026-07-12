@@ -21,6 +21,9 @@ import (
 const defaultBufferSize = 100 * 1_000 // 100kb
 const InnerPathSeparator = "!"
 
+// Match the standard library's threshold for treating repeated empty reads as no progress.
+const maxConsecutiveFragmentEmptyReads = 100
+
 var bufferPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, defaultBufferSize)
@@ -97,6 +100,10 @@ type File struct {
 	outerPaths []string
 	// archiveDepth is the current archive nesting depth
 	archiveDepth int
+	// fileScan* fields are populated only by the opt-in filesystem tournament.
+	fileScanRoot    string
+	fileScanMetrics *FileScanMetrics
+	fileScanLocal   *FileScanLocalMetrics
 }
 
 // Fragments yields fragments for the this source
@@ -104,6 +111,7 @@ func (s *File) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	var err error
 	var format archives.Format
 	stream := s.Content
+	identifyTimer := s.fileScanLocal.StartPhase(FileScanPhaseArchive)
 
 	// tar files can sometimes be compressed without having the compression
 	// in their file extension name. Even though it is common to have the
@@ -116,6 +124,7 @@ func (s *File) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	} else {
 		format, _, err = archives.Identify(ctx, s.Path, nil)
 	}
+	identifyTimer.Done(0, err)
 
 	// Process the file as an archive if there's no error && Identify returns
 	// a format; but if there's an error or no format, just swallow the error
@@ -141,11 +150,15 @@ func (s *File) Fragments(ctx context.Context, yield FragmentsFunc) error {
 			return nil
 		}
 		if extractor, ok := format.(archives.Extractor); ok {
+			timer := s.fileScanLocal.StartPhase(FileScanPhaseArchive)
 			s.extractorFragments(ctx, extractor, stream, yield)
+			timer.Done(0, nil)
 			return nil
 		}
 		if decompressor, ok := format.(archives.Decompressor); ok {
+			timer := s.fileScanLocal.StartPhase(FileScanPhaseDecompression)
 			s.decompressorFragments(ctx, decompressor, stream, yield)
+			timer.Done(0, nil)
 			return nil
 		}
 		logging.Warn().Str("path", s.FullPath()).Msg("skipping unknown archive type")
@@ -206,9 +219,12 @@ func (s *File) extractorFragments(ctx context.Context, extractor archives.Extrac
 			Path:            path,
 			Symlink:         s.Symlink,
 			ShouldSkip:      s.ShouldSkip,
-			outerPaths:      append(s.outerPaths, filepath.ToSlash(s.Path)),
+			outerPaths:      appendOuterPath(s.outerPaths, filepath.ToSlash(s.Path)),
 			MaxArchiveDepth: s.MaxArchiveDepth,
 			archiveDepth:    s.archiveDepth + 1,
+			fileScanRoot:    s.fileScanRoot,
+			fileScanMetrics: s.fileScanMetrics,
+			fileScanLocal:   s.fileScanLocal,
 		}
 
 		return file.Fragments(ctx, yield)
@@ -276,14 +292,22 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 				Attributes: attr,
 			}
 
-			n, err := reader.Read(s.Buffer)
+			n, err := readFragmentChunk(ctx, reader, s.Buffer)
+			if ctxErr := ctx.Err(); ctxErr != nil && err == ctxErr {
+				return ctxErr
+			}
 			if n == 0 {
 				if err != nil && err != io.EOF {
 					if isArchiveContent {
 						logging.Warn().Err(err).Str("path", fullPath).Msg("could not read archive content")
 						return nil
 					}
-					return yield(fragment, fmt.Errorf("could not read file: %w", err))
+					return s.yieldFileScanFragment(
+						fragment,
+						fmt.Errorf("could not read file: %w", err),
+						FileScanPhaseTimer{},
+						yield,
+					)
 				}
 
 				return nil
@@ -295,6 +319,8 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 				s.Buffer = expanded
 			}
 
+			framingTimer := s.fileScanLocal.StartPhase(FileScanPhaseFraming)
+
 			// Only check the filetype at the start of file.
 			if totalLines == 0 {
 				// TODO: could other optimizations be introduced here?
@@ -303,9 +329,11 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 						logging.Warn().Err(err).Str("path", fullPath).Msg("could not determine archive content type")
 						return nil
 					}
-					return yield(
+					return s.yieldFileScanFragment(
 						fragment,
 						fmt.Errorf("could not read file: could not determine type: %w", err),
+						framingTimer,
+						yield,
 					)
 				} else if mimetype.MIME.Type == "application" {
 					logging.Debug().
@@ -313,6 +341,7 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 						Str("path", fullPath).
 						Msgf("skipping binary file")
 
+					framingTimer.Done(uint64(n), nil)
 					return nil
 				}
 			}
@@ -324,9 +353,11 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 					logging.Warn().Err(err).Str("path", fullPath).Msg("could not read archive content until safe boundary")
 					stopAfterYield = true
 				} else {
-					return yield(
+					return s.yieldFileScanFragment(
 						fragment,
 						fmt.Errorf("could not read file: could not read until safe boundary: %w", err),
+						framingTimer,
+						yield,
 					)
 				}
 			}
@@ -350,26 +381,62 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 			if err != nil && err != io.EOF {
 				if isArchiveContent {
 					logging.Warn().Err(err).Str("path", fullPath).Msg("issue reading archive content")
-					return yield(fragment, nil)
+					return s.yieldFileScanFragment(fragment, nil, framingTimer, yield)
 				} else {
 					logging.Warn().Err(err).Msgf("issue reading file")
 				}
 			}
 
 			if stopAfterYield {
-				return yield(fragment, nil)
+				return s.yieldFileScanFragment(fragment, nil, framingTimer, yield)
 			}
 
 			// Done with the file!
 			if err == io.EOF {
-				return yield(fragment, nil)
+				return s.yieldFileScanFragment(fragment, nil, framingTimer, yield)
 			}
 
-			if err := yield(fragment, err); err != nil {
+			if err := s.yieldFileScanFragment(fragment, err, framingTimer, yield); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func readFragmentChunk(ctx context.Context, reader io.Reader, buf []byte) (int, error) {
+	n := 0
+	emptyReads := 0
+	for n < len(buf) {
+		if err := ctx.Err(); err != nil {
+			return n, err
+		}
+
+		readN, err := reader.Read(buf[n:])
+		n += readN
+		if err != nil {
+			return n, err
+		}
+		if readN == 0 {
+			emptyReads++
+			if emptyReads >= maxConsecutiveFragmentEmptyReads {
+				return n, io.ErrNoProgress
+			}
+			continue
+		}
+		emptyReads = 0
+	}
+	return n, nil
+}
+
+func (s *File) yieldFileScanFragment(
+	fragment Fragment,
+	err error,
+	timer FileScanPhaseTimer,
+	yield FragmentsFunc,
+) error {
+	timer.Done(uint64(len(fragment.Raw)), err)
+	s.fileScanMetrics.RecordFragment(s.fileScanRoot, fragment)
+	return yield(fragment, err)
 }
 
 // FullPath returns the File.Path with any preceding outer paths
@@ -377,10 +444,17 @@ func (s *File) FullPath() string {
 	if len(s.outerPaths) > 0 {
 		return strings.Join(
 			// outerPaths have already been normalized to slash
-			append(s.outerPaths, s.Path),
+			appendOuterPath(s.outerPaths, s.Path),
 			InnerPathSeparator,
 		)
 	}
 
 	return s.Path
+}
+
+func appendOuterPath(outerPaths []string, path string) []string {
+	extended := make([]string, len(outerPaths)+1)
+	copy(extended, outerPaths)
+	extended[len(outerPaths)] = path
+	return extended
 }

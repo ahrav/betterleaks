@@ -40,6 +40,54 @@ func (g ruleGate) MatchString(s string) bool {
 	return g.matchString(s, nil, nil)
 }
 
+// matchWindows is matchString for hit-window verification: requiredAny is
+// evaluated against the FULL fragment (both because the shared facts cache
+// is fragment-scoped and because a fragment-wide reject is sound), while
+// the gate regex runs only over the window slices. Sound because every
+// gate match provably contains a rule keyword and fits within the merged
+// windows (see rule_window.go).
+func (g ruleGate) matchWindows(s string, windows [][2]int, facts *ruleGateScanFacts, stats *ruleGateStats) bool {
+	if g.regex == nil {
+		if stats != nil {
+			stats.gateCompileFailOpens.Add(1)
+		}
+		return true
+	}
+	if err := g.regex.Compile(); err != nil {
+		if stats != nil {
+			stats.gateCompileFailOpens.Add(1)
+		}
+		return true
+	}
+	if g.requiredAny != "" {
+		if stats != nil {
+			stats.requiredAnyChecks.Add(1)
+		}
+		if !requiredAnyContains(facts, s, g.requiredAny, stats) {
+			if stats != nil {
+				stats.requiredAnyRejects.Add(1)
+			}
+			return false
+		}
+	}
+	for _, w := range windows {
+		if stats != nil {
+			stats.regexGateChecks.Add(1)
+			stats.regexGateBytes.Add(uint64(w[1] - w[0]))
+		}
+		if g.regex.MatchString(s[w[0]:w[1]]) {
+			if stats != nil {
+				stats.regexGateAccepts.Add(1)
+			}
+			return true
+		}
+	}
+	if stats != nil {
+		stats.regexGateRejects.Add(1)
+	}
+	return false
+}
+
 func (g ruleGate) matchString(s string, facts *ruleGateScanFacts, stats *ruleGateStats) bool {
 	if g.regex == nil {
 		if stats != nil {

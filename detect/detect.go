@@ -169,6 +169,15 @@ type Detector struct {
 	// noKeywordRuleRanks holds the ranks of rules that have no keywords and
 	// must always be considered.
 	noKeywordRuleRanks []int
+	// windowPlanByRank[rank] is the hit-window plan for the rule; invalid
+	// plans scan the full fragment (see rule_window.go).
+	windowPlanByRank []windowPlan
+	// windowKeywordsByRank[rank] holds the rule's lowered keyword bytes for
+	// occurrence discovery when windowing is enabled for that rule.
+	windowKeywordsByRank [][][]byte
+	// windowingDisabled turns off hit-window verification globally
+	// (BETTERLEAKS_NO_WINDOW=1); windows are on by default in the lab.
+	windowingDisabled bool
 	// candidatePool recycles the per-fragment candidate-collection scratch.
 	candidatePool sync.Pool
 
@@ -300,10 +309,21 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 	d.rulesBySpecificity = orderedRulesBySpecificity(cfg)
 	d.ruleRank = make(map[string]int, len(d.rulesBySpecificity))
 	d.mandatoryAtomGatesByRank = make([][][]byte, len(d.rulesBySpecificity))
+	d.windowPlanByRank = make([]windowPlan, len(d.rulesBySpecificity))
+	d.windowKeywordsByRank = make([][][]byte, len(d.rulesBySpecificity))
+	d.windowingDisabled = os.Getenv("BETTERLEAKS_NO_WINDOW") == "1"
 	for i, ruleID := range d.rulesBySpecificity {
 		d.ruleRank[ruleID] = i
 		if rule := cfg.Rules[ruleID]; rule.Regex != nil {
 			d.mandatoryAtomGatesByRank[i] = mandatoryAtomGateForPattern(rule.Regex.String(), rule.Keywords)
+			if wp := windowPlanForPattern(rule.Regex.String(), rule.Keywords); wp.valid() {
+				d.windowPlanByRank[i] = wp
+				kws := make([][]byte, 0, len(rule.Keywords))
+				for _, kw := range rule.Keywords {
+					kws = append(kws, []byte(strings.ToLower(kw)))
+				}
+				d.windowKeywordsByRank[i] = kws
+			}
 		}
 	}
 
@@ -837,6 +857,14 @@ ScanLoop:
 			// Evaluate rules in specificity-rank order (ascending), matching
 			// the previous orderedRuleIDs contract exactly.
 			slices.Sort(scratch.ranks)
+			// Hit-window verification is unsound when the pass contains a
+			// non-ASCII case-fold partner of an ASCII letter; check once.
+			// maxLineLen bounds newline-free runs for per-fragment widths.
+			windowsOK := !d.windowingDisabled && !hasUnicodeFoldTrap(lowerBuf)
+			passMaxLine := 0
+			if windowsOK {
+				passMaxLine = longestNewlineFreeRun(lowerBuf)
+			}
 			cancelled := false
 			for _, rank := range scratch.ranks {
 				select {
@@ -864,7 +892,17 @@ ScanLoop:
 						}
 					}
 					rule := d.Config.Rules[d.rulesBySpecificity[rank]]
-					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings, gateFacts)...)
+					var windows [][2]int
+					// Windowing pays only when the avoided scan bytes exceed
+					// the occurrence-discovery cost; small fragments scan
+					// faster in one pass than through window bookkeeping.
+					const windowMinFragment = 16 << 10
+					if windowsOK && len(lowerBuf) >= windowMinFragment && d.windowPlanByRank[rank].valid() {
+						if w := d.windowPlanByRank[rank].width(passMaxLine); w*8 < len(lowerBuf) {
+							windows = ruleWindows(lowerBuf, d.windowKeywordsByRank[rank], w)
+						}
+					}
+					findings = append(findings, d.detectFragmentWithRule(fragment, currentRaw, rule, encodedSegments, findings, gateFacts, windows)...)
 				}
 				if cancelled {
 					break
@@ -947,7 +985,8 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 	r config.Rule,
 	encodedSegments []*codec.EncodedSegment,
 	priorFindings []report.Finding,
-	gateFacts *ruleGateScanFacts) []report.Finding {
+	gateFacts *ruleGateScanFacts,
+	windows [][2]int) []report.Finding {
 	var findings []report.Finding
 	if d.ruleGateStats != nil {
 		d.ruleGateStats.ruleChecks.Add(1)
@@ -994,16 +1033,31 @@ func (d *Detector) detectFragmentWithRule(fragment sources.Fragment,
 		if d.ruleGateStats != nil {
 			d.ruleGateStats.gatedRuleChecks.Add(1)
 		}
-		if !gate.matchString(currentRaw, gateFacts, d.ruleGateStats) {
+		if len(windows) > 0 {
+			if !gate.matchWindows(currentRaw, windows, gateFacts, d.ruleGateStats) {
+				return findings
+			}
+		} else if !gate.matchString(currentRaw, gateFacts, d.ruleGateStats) {
 			return findings
 		}
 	}
 
-	if d.ruleGateStats != nil {
-		d.ruleGateStats.fullRegexCalls.Add(1)
-		d.ruleGateStats.fullRegexBytes.Add(uint64(len(currentRaw)))
+	var matches [][]int
+	if len(windows) > 0 {
+		if d.ruleGateStats != nil {
+			d.ruleGateStats.fullRegexCalls.Add(1)
+			for _, w := range windows {
+				d.ruleGateStats.fullRegexBytes.Add(uint64(w[1] - w[0]))
+			}
+		}
+		matches = findAllInWindows(r.Regex, currentRaw, windows)
+	} else {
+		if d.ruleGateStats != nil {
+			d.ruleGateStats.fullRegexCalls.Add(1)
+			d.ruleGateStats.fullRegexBytes.Add(uint64(len(currentRaw)))
+		}
+		matches = r.Regex.FindAllStringIndex(currentRaw, -1)
 	}
-	matches := r.Regex.FindAllStringIndex(currentRaw, -1)
 	if len(matches) == 0 {
 		if d.ruleGateStats != nil {
 			d.ruleGateStats.fullRegexNoMatchCalls.Add(1)
@@ -1247,7 +1301,7 @@ func (d *Detector) processRequiredRules(fragment sources.Fragment, currentRaw st
 		inheritedFragment.InheritedFromFinding = true
 
 		// Call detectRule once for each required rule
-		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, rule, encodedSegments, nil, nil)
+		requiredFindings := d.detectFragmentWithRule(inheritedFragment, currentRaw, rule, encodedSegments, nil, nil, nil)
 		allRequiredFindings[requiredRule.RuleID] = requiredFindings
 
 		logger().Debug().

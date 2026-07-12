@@ -336,7 +336,7 @@ local adobe token placeholder text without assignment`,
 	withoutGates.ruleGates = nil
 	withoutGates.mandatoryAtomGatesByRank = nil
 	t.Logf("entropy=%f", shannonEntropy(fragment.Raw))
-	t.Logf("rule findings=%#v", withoutGates.detectFragmentWithRule(fragment, fragment.Raw, cfg.Rules["atlassian-api-token"], nil, nil, nil))
+	t.Logf("rule findings=%#v", withoutGates.detectFragmentWithRule(fragment, fragment.Raw, cfg.Rules["atlassian-api-token"], nil, nil, nil, nil))
 
 	got := withGates.detectFragment(context.Background(), fragment)
 	want := withoutGates.detectFragment(context.Background(), fragment)

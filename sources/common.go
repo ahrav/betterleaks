@@ -69,73 +69,80 @@ func shouldSkipPath(skip SkipFunc, path string) bool {
 	return false
 }
 
-// readUntilSafeBoundary consumes |f| until it finds two consecutive `\n` characters, up to |maxPeekSize|.
-// This hopefully avoids splitting. (https://github.com/gitleaks/gitleaks/issues/1651)
+// readUntilSafeBoundary consumes r until it finds two newlines separated only
+// by whitespace, up to maxPeekSize. It works on buffered spans so the common
+// long-line case does not pay one ReadByte and WriteByte call per byte.
 func readUntilSafeBoundary(r *bufio.Reader, n int, maxPeekSize int, peekBuf *bytes.Buffer) error {
 	if peekBuf.Len() == 0 {
 		return nil
 	}
 
-	// Does the buffer end in consecutive newlines?
-	var (
-		data         = peekBuf.Bytes()
-		lastChar     = data[len(data)-1]
-		newlineCount = 0 // Tracks consecutive newlines
-	)
-
-	if isWhitespace[lastChar] {
+	data := peekBuf.Bytes()
+	if isWhitespace[data[len(data)-1]] {
+		newlineCount := 0
 		for i := len(data) - 1; i >= 0; i-- {
-			lastChar = data[i]
-			if lastChar == '\n' {
+			switch {
+			case data[i] == '\n':
 				newlineCount++
-
-				// Stop if two consecutive newlines are found
 				if newlineCount >= 2 {
 					return nil
 				}
-			} else if isWhitespace[lastChar] {
-				// The presence of other whitespace characters (`\r`, ` `, `\t`) shouldn't reset the count.
-				// (Intentionally do nothing.)
-			} else {
-				break
+			case isWhitespace[data[i]]:
+			default:
+				i = -1
 			}
 		}
 	}
 
-	// If not, read ahead until we (hopefully) find some.
-	newlineCount = 0
-	for {
-		data = peekBuf.Bytes()
-		// Check if the last character is a newline.
-		lastChar = data[len(data)-1]
-		if lastChar == '\n' {
+	newlineCount := 0
+	process := func(b byte) bool {
+		switch {
+		case b == '\n':
 			newlineCount++
+			return newlineCount >= 2
+		case isWhitespace[b]:
+			return false
+		default:
+			newlineCount = 0
+			return false
+		}
+	}
+	if process(data[len(data)-1]) {
+		return nil
+	}
 
-			// Stop if two consecutive newlines are found
-			if newlineCount >= 2 {
-				break
+	for peekBuf.Len()-n < maxPeekSize {
+		if r.Buffered() == 0 {
+			if _, err := r.Peek(1); err != nil {
+				if err == io.EOF {
+					return nil
+				}
+				return err
 			}
-		} else if isWhitespace[lastChar] {
-			// The presence of other whitespace characters (`\r`, ` `, `\t`) shouldn't reset the count.
-			// (Intentionally do nothing.)
-		} else {
-			newlineCount = 0 // Reset if a non-newline character is found
 		}
 
-		// Stop growing the buffer if it reaches maxSize
-		if (peekBuf.Len() - n) >= maxPeekSize {
-			break
-		}
-
-		// Read additional data into a temporary buffer
-		b, err := r.ReadByte()
+		remaining := maxPeekSize - (peekBuf.Len() - n)
+		available := min(r.Buffered(), remaining)
+		chunk, err := r.Peek(available)
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
 			return err
 		}
-		peekBuf.WriteByte(b)
+		consume := len(chunk)
+		for i, b := range chunk {
+			if process(b) {
+				consume = i + 1
+				break
+			}
+		}
+		if _, err := peekBuf.Write(chunk[:consume]); err != nil {
+			return err
+		}
+		if _, err := r.Discard(consume); err != nil {
+			return err
+		}
+		if consume < len(chunk) || newlineCount >= 2 {
+			return nil
+		}
 	}
 	return nil
 }

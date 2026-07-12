@@ -28,13 +28,29 @@ var bufferPool = sync.Pool{
 	},
 }
 
+var extendedBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, defaultBufferSize, defaultBufferSize+maxPeekSize)
+		return &buf
+	},
+}
+
 func getBuffer() []byte {
 	return *bufferPool.Get().(*[]byte)
 }
 
 func putBuffer(buf []byte) {
-	buf = buf[:cap(buf)]
+	buf = buf[:defaultBufferSize]
 	bufferPool.Put(&buf)
+}
+
+func getExtendedBuffer() []byte {
+	return *extendedBufferPool.Get().(*[]byte)
+}
+
+func putExtendedBuffer(buf []byte) {
+	buf = buf[:defaultBufferSize]
+	extendedBufferPool.Put(&buf)
 }
 
 var readerPool = sync.Pool{
@@ -223,11 +239,19 @@ func (s *File) decompressorFragments(ctx context.Context, decompressor archives.
 
 // fileFragments reads the file into fragments to yield.
 func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiveContent bool, yield FragmentsFunc) error {
+	ownedBuffer := s.Buffer == nil
+	putOwnedBuffer := func(buf []byte) {
+		if cap(buf) == defaultBufferSize {
+			putBuffer(buf)
+		} else {
+			putExtendedBuffer(buf)
+		}
+	}
 	// Use a pooled buffer if the caller hasn't provided one.
-	if s.Buffer == nil {
+	if ownedBuffer {
 		s.Buffer = getBuffer()
 		defer func() {
-			putBuffer(s.Buffer)
+			putOwnedBuffer(s.Buffer)
 			s.Buffer = nil
 		}()
 	}
@@ -264,6 +288,12 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 
 				return nil
 			}
+			if ownedBuffer && n == len(s.Buffer) && cap(s.Buffer) < defaultBufferSize+maxPeekSize {
+				expanded := getExtendedBuffer()
+				copy(expanded, s.Buffer[:n])
+				putOwnedBuffer(s.Buffer)
+				s.Buffer = expanded
+			}
 
 			// Only check the filetype at the start of file.
 			if totalLines == 0 {
@@ -286,7 +316,6 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, isArchiv
 					return nil
 				}
 			}
-
 			// Try to split chunks across large areas of whitespace, if possible.
 			peekBuf := bytes.NewBuffer(s.Buffer[:n])
 			stopAfterYield := false

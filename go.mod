@@ -6,6 +6,7 @@ toolchain go1.25.10
 
 require (
 	github.com/BobuSumisu/aho-corasick v1.0.3
+	github.com/cosnicolaou/pbzip2 v1.0.6
 	github.com/expr-lang/expr v1.17.8
 	github.com/fatih/semgroup v1.2.0
 	github.com/gitleaks/go-gitdiff v0.9.1

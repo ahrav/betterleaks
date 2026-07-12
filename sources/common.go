@@ -13,13 +13,25 @@ import (
 	"time"
 
 	"github.com/betterleaks/betterleaks/logging"
+	"github.com/cosnicolaou/pbzip2"
 	"github.com/mholt/archives"
 )
 
 const (
 	maxPeekSize     = 25 * 1_000 // 25kb
 	downloadTimeout = 5 * time.Minute
+
+	// bz2PerReaderConcurrency bounds parallel block decoders per bzip2
+	// stream; file-level parallelism already fans out across sources.
+	// Measured: raising it does not improve the scan tail (the pbzip2
+	// scanner feeds blocks serially), it only grows peak RSS.
+	bz2PerReaderConcurrency = 4
 )
+
+// bz2SharedPool bounds total in-flight bzip2 block decoders process-wide:
+// each buffers up to ~900KB of decompressed block, so an unbounded fleet
+// of concurrent archive scans multiplies into gigabytes of transient RSS.
+var bz2SharedPool = pbzip2.CreateConcurrencyPool(runtime.GOMAXPROCS(0))
 
 var isWhitespace [256]bool
 var isWindows = runtime.GOOS == "windows"

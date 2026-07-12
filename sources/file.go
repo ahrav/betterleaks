@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cosnicolaou/pbzip2"
 	"github.com/h2non/filetype"
 	"github.com/mholt/archives"
 	"github.com/rs/zerolog"
@@ -237,7 +238,24 @@ func (s *File) extractorFragments(ctx context.Context, extractor archives.Extrac
 
 // decompressorFragments recursively crawls archives and yields fragments
 func (s *File) decompressorFragments(ctx context.Context, decompressor archives.Decompressor, reader io.Reader, yield FragmentsFunc) {
-	innerReader, err := decompressor.OpenReader(reader)
+	var innerReader io.ReadCloser
+	var err error
+	if _, isBz2 := decompressor.(archives.Bz2); isBz2 {
+		// bzip2 blocks decode independently; the parallel reader
+		// (block-magic scan + concurrent block decode) is ~4x the
+		// serial dsnet decoder on multi-block archives and behaves
+		// identically for single-block ones. Concurrency is bounded
+		// twice: per reader (many File sources decode simultaneously)
+		// and globally via a shared pool, since each in-flight block
+		// buffers up to 900KB of decompressed data.
+		innerReader = io.NopCloser(pbzip2.NewReader(ctx, reader,
+			pbzip2.DecompressionOptions(
+				pbzip2.BZConcurrency(bz2PerReaderConcurrency),
+				pbzip2.BZConcurrencyPool(bz2SharedPool),
+			)))
+	} else {
+		innerReader, err = decompressor.OpenReader(reader)
+	}
 	if err != nil {
 		logging.Warn().Err(err).Str("path", s.FullPath()).Msg("could not read compressed file")
 		return

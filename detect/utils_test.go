@@ -2,6 +2,7 @@ package detect
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -250,4 +251,15 @@ func TestAsciiLowerEquivalence(t *testing.T) {
 
 	// Empty input must be a no-op.
 	check(nil)
+}
+
+// TestAllowSignatureGateInvariant pins the gate substring to every allow
+// signature: if a new signature is added without containing the gate, the
+// fast-path reject in containsAllowSignature would silently drop it.
+func TestAllowSignatureGateInvariant(t *testing.T) {
+	for _, sig := range allowSignatures {
+		if !strings.Contains(sig, allowSignatureGate) {
+			t.Fatalf("allow signature %q does not contain gate %q", sig, allowSignatureGate)
+		}
+	}
 }

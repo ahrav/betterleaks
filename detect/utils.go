@@ -337,8 +337,17 @@ func findNewlineIndices(s string) []int {
 	return indices
 }
 
+// allowSignatureGate is a substring of every entry in allowSignatures
+// (asserted by test), so one scan rejects the common no-signature case
+// instead of one full scan per signature. Finding lines can be huge
+// (minified sources), making the per-signature scans measurable.
+const allowSignatureGate = "leaks:allow"
+
 // containsAllowSignature checks if the line contains any of the allow signatures
 func containsAllowSignature(line string) bool {
+	if !strings.Contains(line, allowSignatureGate) {
+		return false
+	}
 	for _, sig := range allowSignatures {
 		if strings.Contains(line, sig) {
 			return true

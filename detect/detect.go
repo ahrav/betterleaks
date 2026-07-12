@@ -106,6 +106,16 @@ type Detector struct {
 	// prefilterRules maps prefilter pattern index -> rule IDs for that
 	// keyword, avoiding per-match string conversion in the hot loop.
 	prefilterRules [][]string
+	// prefilterMode selects the candidate-collection architecture (ahoc-lab
+	// experiment knob; see prefilter_mode.go).
+	prefilterMode prefilterMode
+	// prefilterSet is the RE2::Set keyword scanner used when prefilterMode
+	// is prefilterRE2Set; pattern indices align with prefilterRuleRanks.
+	prefilterSet *re2Set
+	// prefilterTri is the rolling-3-gram keyword scanner used when
+	// prefilterMode is prefilterTrigram; pattern indices align with
+	// prefilterRuleRanks.
+	prefilterTri *trigramPrefilter
 
 	// ruleGates holds cheap rejection regexes for semi-generic rules; see
 	// rule_gate.go. A fragment that fails a rule's gate cannot match the
@@ -271,7 +281,18 @@ func NewDetectorContext(ctx context.Context, cfg *config.Config, valOpts Validat
 	}
 	keywords := maps.Keys(cfg.Keywords)
 	sort.Strings(keywords)
-	d.prefilter = ahocorasick.NewTrieBuilder().AddStrings(keywords).Build()
+	d.prefilterMode = prefilterModeFromEnv()
+	switch d.prefilterMode {
+	case prefilterRE2Set:
+		d.prefilterSet = compileKeywordSet(keywords)
+	case prefilterTrigram:
+		d.prefilterTri = newTrigramPrefilter(keywords)
+		if d.prefilterTri == nil {
+			logging.Fatal().Msg("trigram prefilter requires all keywords >= 3 bytes")
+		}
+	case prefilterAhoC:
+		d.prefilter = ahocorasick.NewTrieBuilder().AddStrings(keywords).Build()
+	}
 	d.prefilterRules = make([][]string, len(keywords))
 	for i, kw := range keywords {
 		d.prefilterRules[i] = cfg.KeywordToRules[kw]
@@ -771,16 +792,40 @@ ScanLoop:
 			// slice) so no per-fragment map or []string sort is allocated.
 			// Use a pooled byte buffer for lowercasing to avoid allocating.
 			scratch := d.candidatePool.Get().(*candidateScratch)
-			lowerBufPtr, lowerBuf := getLowerBuf(currentRaw)
-			d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
+			markPattern := func(pattern uint32) {
 				for _, rank := range d.prefilterRuleRanks[pattern] {
 					if !scratch.seen[rank] {
 						scratch.seen[rank] = true
 						scratch.ranks = append(scratch.ranks, rank)
 					}
 				}
-				return true
-			})
+			}
+			var lowerBufPtr *[]byte
+			var lowerBuf []byte
+			if d.prefilterMode == prefilterTrigram {
+				// Fused pass: lowercase into the pooled buffer while
+				// scanning trigrams, replacing asciiLower + walk.
+				lowerBufPtr, lowerBuf = getLowerBufRaw(len(currentRaw))
+				d.prefilterTri.collectPatternsLowering(lowerBuf, currentRaw, markPattern)
+			} else {
+				lowerBufPtr, lowerBuf = getLowerBuf(currentRaw)
+				switch d.prefilterMode {
+				case prefilterAhoC:
+					d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
+						markPattern(pattern)
+						return true
+					})
+				case prefilterRE2Set:
+					for _, pattern := range d.prefilterSet.FindAll(lowerBuf, -1) {
+						markPattern(uint32(pattern))
+					}
+				case prefilterNone:
+					for rank := range scratch.seen {
+						scratch.seen[rank] = true
+						scratch.ranks = append(scratch.ranks, rank)
+					}
+				}
+			}
 			// Always include rules that have no keywords.
 			for _, rank := range d.noKeywordRuleRanks {
 				if !scratch.seen[rank] {

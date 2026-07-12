@@ -243,14 +243,22 @@ var lowercaseBufPool = sync.Pool{
 // getLowerBuf returns an ASCII-lowercased copy of s in a pooled byte buffer.
 // Caller must call putLowerBuf when done with the returned slice.
 func getLowerBuf(s string) (*[]byte, []byte) {
+	bp, buf := getLowerBufRaw(len(s))
+	asciiLower(buf, s)
+	return bp, buf
+}
+
+// getLowerBufRaw returns an uninitialized pooled buffer of length n for
+// callers that fill it themselves (e.g. the fused lowercase+scan pass).
+// Caller must call putLowerBuf when done with the returned slice.
+func getLowerBufRaw(n int) (*[]byte, []byte) {
 	bp := lowercaseBufPool.Get().(*[]byte)
 	buf := *bp
-	if cap(buf) < len(s) {
-		buf = make([]byte, len(s))
+	if cap(buf) < n {
+		buf = make([]byte, n)
 	} else {
-		buf = buf[:len(s)]
+		buf = buf[:n]
 	}
-	asciiLower(buf, s)
 	*bp = buf
 	return bp, buf
 }

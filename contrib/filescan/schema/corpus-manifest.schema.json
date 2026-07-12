@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betterleaks.dev/schema/filescan/corpus-manifest-v1.json",
+  "title": "Betterleaks filesystem corpus manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "workload_class", "role", "root", "created_utc",
+    "source", "entries_file", "entries_sha256", "portable_content_digest",
+    "live_guard_digest", "summary", "expected_outputs"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "minLength": 1},
+    "workload_class": {"type": "string", "minLength": 1},
+    "role": {"enum": ["calibration", "confirmation", "correctness"]},
+    "root": {"type": "string", "minLength": 1},
+    "created_utc": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "revision"],
+      "properties": {
+        "origin": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "license": {"type": "string"},
+        "objects": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "entries_file": {"type": "string", "minLength": 1},
+    "entries_sha256": {"$ref": "#/$defs/sha256"},
+    "portable_content_digest": {"$ref": "#/$defs/sha256"},
+    "live_guard_digest": {"$ref": "#/$defs/sha256"},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries", "regular_files", "directories", "symlinks", "other_entries",
+        "manifest_errors", "logical_bytes", "physical_bytes", "sparse_files",
+        "max_depth", "max_fanout", "file_size_bins", "file_extensions",
+        "archive_extensions", "error_categories"
+      ],
+      "properties": {
+        "entries": {"$ref": "#/$defs/nonnegative"},
+        "regular_files": {"$ref": "#/$defs/nonnegative"},
+        "directories": {"$ref": "#/$defs/nonnegative"},
+        "symlinks": {"$ref": "#/$defs/nonnegative"},
+        "other_entries": {"$ref": "#/$defs/nonnegative"},
+        "manifest_errors": {"$ref": "#/$defs/nonnegative"},
+        "logical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "physical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "sparse_files": {"$ref": "#/$defs/nonnegative"},
+        "max_depth": {"$ref": "#/$defs/nonnegative"},
+        "max_fanout": {"$ref": "#/$defs/nonnegative"},
+        "file_size_bins": {"$ref": "#/$defs/count_map"},
+        "file_extensions": {"$ref": "#/$defs/count_map"},
+        "archive_extensions": {"$ref": "#/$defs/count_map"},
+        "error_categories": {"$ref": "#/$defs/count_map"}
+      }
+    },
+    "expected_outputs": {"$ref": "#/$defs/outputs"},
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frozen_utc"],
+      "properties": {
+        "frozen_utc": {"type": "string", "format": "date-time", "pattern": "Z$"},
+        "candidate": {"type": "string"}
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "required": ["oracle"],
+      "properties": {"expected_outputs": {"$ref": "#/$defs/outputs_frozen"}}
+    },
+    {
+      "not": {"required": ["oracle"]},
+      "properties": {"expected_outputs": {"$ref": "#/$defs/outputs_unfrozen"}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "count_map": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/nonnegative"}
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "canonical_bytes", "digest"],
+      "properties": {
+        "count": {"$ref": "#/$defs/nonnegative"},
+        "canonical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "digest": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"}
+      }
+    },
+    "frozen_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "canonical_bytes", "digest"],
+      "properties": {
+        "count": {"$ref": "#/$defs/nonnegative"},
+        "canonical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "unfrozen_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "canonical_bytes", "digest"],
+      "properties": {
+        "count": {"const": 0},
+        "canonical_bytes": {"const": 0},
+        "digest": {"const": ""}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "fragments", "findings", "errors", "fallbacks"],
+      "properties": {
+        "targets": {"$ref": "#/$defs/identity"},
+        "fragments": {"$ref": "#/$defs/identity"},
+        "findings": {"$ref": "#/$defs/identity"},
+        "errors": {"$ref": "#/$defs/identity"},
+        "fallbacks": {"$ref": "#/$defs/identity"}
+      }
+    },
+    "outputs_frozen": {
+      "allOf": [
+        {"$ref": "#/$defs/outputs"},
+        {
+          "properties": {
+            "targets": {"$ref": "#/$defs/frozen_identity"},
+            "fragments": {"$ref": "#/$defs/frozen_identity"},
+            "findings": {"$ref": "#/$defs/frozen_identity"},
+            "errors": {"$ref": "#/$defs/frozen_identity"},
+            "fallbacks": {"$ref": "#/$defs/frozen_identity"}
+          }
+        }
+      ]
+    },
+    "outputs_unfrozen": {
+      "allOf": [
+        {"$ref": "#/$defs/outputs"},
+        {
+          "properties": {
+            "targets": {"$ref": "#/$defs/unfrozen_identity"},
+            "fragments": {"$ref": "#/$defs/unfrozen_identity"},
+            "findings": {"$ref": "#/$defs/unfrozen_identity"},
+            "errors": {"$ref": "#/$defs/unfrozen_identity"},
+            "fallbacks": {"$ref": "#/$defs/unfrozen_identity"}
+          }
+        }
+      ]
+    }
+  }
+}

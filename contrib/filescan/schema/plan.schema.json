@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betterleaks.dev/schema/filescan/plan-v1.json",
+  "title": "Betterleaks fixed-horizon filesystem benchmark plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "study_id", "phase", "seed", "binary", "working_directory",
+    "inherit_environment", "environment", "fixed_horizon_blocks", "sample_interval_ms",
+    "timeout_seconds", "require_scanner_metrics", "max_infrastructure_replacement_blocks",
+    "baseline_candidate", "candidates", "strata", "analysis"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "study_id": {"$ref": "#/$defs/id"},
+    "phase": {"enum": ["calibration", "pilot", "confirmation"]},
+    "seed": {"type": "integer"},
+    "binary": {"$ref": "#/$defs/absolute_path"},
+    "binary_sha256": {"$ref": "#/$defs/sha256"},
+    "working_directory": {"$ref": "#/$defs/absolute_path"},
+    "common_args": {"$ref": "#/$defs/argv"},
+    "inherit_environment": {"type": "boolean"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "artifacts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"$ref": "#/$defs/absolute_path"},
+          "sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "fixed_horizon_blocks": {"type": "integer", "minimum": 1},
+    "sample_interval_ms": {"type": "integer", "minimum": 10, "maximum": 5000},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "require_scanner_metrics": {"type": "boolean"},
+    "max_infrastructure_replacement_blocks": {"type": "integer", "minimum": 0},
+    "pre_run_hooks": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+    "baseline_candidate": {"$ref": "#/$defs/id"},
+    "candidates": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "metrics_candidate": {"type": "string"},
+          "args": {"$ref": "#/$defs/argv"},
+          "environment": {"$ref": "#/$defs/environment"}
+        }
+      }
+    },
+    "strata": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "workload_class", "evidence_role", "corpus_manifest", "root", "cache_state", "scanner_args"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "workload_class": {"type": "string", "minLength": 1},
+          "evidence_role": {"enum": ["performance", "correctness"]},
+          "corpus_manifest": {"$ref": "#/$defs/absolute_path"},
+          "manifest_sha256": {"$ref": "#/$defs/sha256"},
+          "schedule_sha256": {"$ref": "#/$defs/sha256"},
+          "root": {"$ref": "#/$defs/absolute_path"},
+          "cache_state": {"type": "string", "minLength": 1},
+          "scanner_args": {"$ref": "#/$defs/argv"},
+          "allowed_exit_codes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "integer", "minimum": 0, "maximum": 255}
+          },
+          "prepare_hooks": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+          "skip_live_guard": {"type": "boolean"},
+          "allow_manifest_errors": {"type": "boolean"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"evidence_role": {"const": "performance"}}, "required": ["evidence_role"]},
+            "then": {"properties": {"allowed_exit_codes": {"const": [0]}}}
+          }
+        ]
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_worthwhile_effect_pct", "alpha_familywise", "power", "winner_claims",
+        "pilot_variance_inflation", "minimum_confirmation_blocks", "equivalence_margin_pct",
+        "cpu_material_improvement_pct", "rss_material_improvement_pct",
+        "page_cache_material_improvement_pct", "bootstrap_resamples"
+      ],
+      "properties": {
+        "minimum_worthwhile_effect_pct": {"$ref": "#/$defs/percent"},
+        "alpha_familywise": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "power": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "winner_claims": {"type": "integer", "minimum": 1},
+        "pilot_variance_inflation": {"type": "number", "minimum": 1},
+        "minimum_confirmation_blocks": {"type": "integer", "minimum": 2},
+        "equivalence_margin_pct": {"$ref": "#/$defs/percent"},
+        "cpu_material_improvement_pct": {"$ref": "#/$defs/percent"},
+        "rss_material_improvement_pct": {"$ref": "#/$defs/percent"},
+        "page_cache_material_improvement_pct": {"$ref": "#/$defs/percent"},
+        "bootstrap_resamples": {"type": "integer", "minimum": 1000}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"phase": {"enum": ["pilot", "confirmation"]}},
+        "required": ["phase"]
+      },
+      "then": {
+        "required": ["binary_sha256", "artifacts"],
+        "properties": {
+          "inherit_environment": {"const": false},
+          "strata": {
+            "items": {"required": ["manifest_sha256", "schedule_sha256"]}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"phase": {"const": "pilot"}}, "required": ["phase"]},
+      "then": {"properties": {"fixed_horizon_blocks": {"minimum": 6}}}
+    },
+    {
+      "if": {"properties": {"phase": {"const": "confirmation"}}, "required": ["phase"]},
+      "then": {
+        "properties": {
+          "inherit_environment": {"const": false},
+          "require_scanner_metrics": {"const": true},
+          "candidates": {"items": {"required": ["metrics_candidate"]}},
+          "strata": {
+            "items": {"properties": {"skip_live_guard": {"const": false}}}
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "absolute_path": {"type": "string", "pattern": "^/"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "argv": {"type": "array", "items": {"type": "string"}},
+    "environment": {"type": "object", "additionalProperties": {"type": "string"}},
+    "percent": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 100},
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command", "timeout_seconds"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "command": {"$ref": "#/$defs/argv", "minItems": 1},
+        "environment": {"$ref": "#/$defs/environment"},
+        "timeout_seconds": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "study_id": "filescan-gitlab-local-smoke-calibration-v1",
+  "phase": "calibration",
+  "seed": 81249231,
+  "binary": "/tmp/betterleaks-filescan/bin/betterleaks",
+  "working_directory": "/tmp/betterleaks-filescan/work",
+  "common_args": [
+    "--no-banner",
+    "--exit-code=0",
+    "--log-level=error",
+    "--config=/local/home/ahrav/scratch/betterleaks-fork/betterleaks/config/betterleaks.toml",
+    "--max-target-megabytes=0",
+    "--max-decode-depth=5",
+    "--max-archive-depth=8"
+  ],
+  "inherit_environment": false,
+  "environment": {
+    "GOMAXPROCS": "64",
+    "HOME": "/tmp/betterleaks-filescan/home",
+    "LC_ALL": "C",
+    "TZ": "UTC"
+  },
+  "artifacts": [
+    {
+      "path": "/local/home/ahrav/scratch/betterleaks-fork/betterleaks/config/betterleaks.toml",
+      "sha256": "f2e41e4489974ffcfffcdbcc04f1600ba881c35544ce9ea283bc17eb7272ad26"
+    }
+  ],
+  "fixed_horizon_blocks": 2,
+  "sample_interval_ms": 25,
+  "timeout_seconds": 1800,
+  "require_scanner_metrics": true,
+  "max_infrastructure_replacement_blocks": 2,
+  "baseline_candidate": "current-baseline",
+  "candidates": [
+    {
+      "id": "current-baseline",
+      "metrics_candidate": "baseline/parallel",
+      "args": [
+        "--filescan-backend=baseline",
+        "--filescan-namespace=parallel",
+        "--filescan-active-files=128",
+        "--filescan-detector-workers=64",
+        "--filescan-walkers=64",
+        "--filescan-max-inflight-mib=64",
+        "--filescan-inline-detector"
+      ]
+    },
+    {
+      "id": "tuned-buffered-512k",
+      "metrics_candidate": "buffered/parallel",
+      "args": [
+        "--filescan-backend=buffered",
+        "--filescan-namespace=parallel",
+        "--filescan-read-mode=read",
+        "--filescan-prefetch-kib=512",
+        "--filescan-advice=fadv-sequential",
+        "--filescan-active-files=128",
+        "--filescan-detector-workers=64",
+        "--filescan-walkers=64",
+        "--filescan-max-inflight-mib=64",
+        "--filescan-inline-detector"
+      ]
+    }
+  ],
+  "strata": [
+    {
+      "id": "gitlab-foss-warm-local",
+      "workload_class": "source-tree-many-small",
+      "evidence_role": "performance",
+      "corpus_manifest": "/tmp/betterleaks-filescan/manifests/gitlab-foss-local.json",
+      "root": "/local/home/ahrav/scratch/gitlab-foss",
+      "cache_state": "uncontrolled-natural-cache-smoke",
+      "scanner_args": [
+        "dir",
+        "/local/home/ahrav/scratch/gitlab-foss"
+      ]
+    }
+  ],
+  "analysis": {
+    "minimum_worthwhile_effect_pct": 5.0,
+    "alpha_familywise": 0.05,
+    "power": 0.9,
+    "winner_claims": 4,
+    "pilot_variance_inflation": 1.5,
+    "minimum_confirmation_blocks": 12,
+    "equivalence_margin_pct": 2.0,
+    "cpu_material_improvement_pct": 10.0,
+    "rss_material_improvement_pct": 20.0,
+    "page_cache_material_improvement_pct": 20.0,
+    "bootstrap_resamples": 10000
+  }
+}

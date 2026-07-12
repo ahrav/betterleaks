@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betterleaks.dev/schema/filescan/scanner-metrics-v1.json",
+  "title": "Betterleaks scanner metrics FD payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "targets", "fragments", "findings", "errors", "fallbacks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate": {"type": "string"},
+    "targets": {"$ref": "#/$defs/identity"},
+    "fragments": {"$ref": "#/$defs/identity"},
+    "findings": {"$ref": "#/$defs/identity"},
+    "errors": {"$ref": "#/$defs/identity"},
+    "fallbacks": {"$ref": "#/$defs/identity"},
+    "phases": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/phase"}
+    },
+    "backends": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/backend"}
+    },
+    "fallback_reasons": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/nonnegative"}
+    },
+    "ledger_kinds": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/nonnegative"}
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_active_files": {"$ref": "#/$defs/nonnegative"},
+        "max_fragment_queue_depth": {"$ref": "#/$defs/nonnegative"},
+        "max_in_flight_bytes": {"$ref": "#/$defs/nonnegative"},
+        "max_mapped_bytes": {"$ref": "#/$defs/nonnegative"},
+        "max_pinned_bytes": {"$ref": "#/$defs/nonnegative"},
+        "max_queue_depth": {"$ref": "#/$defs/nonnegative"},
+        "max_submitted_bytes": {"$ref": "#/$defs/nonnegative"},
+        "max_completed_unconsumed_bytes": {"$ref": "#/$defs/nonnegative"},
+        "max_reorder_depth": {"$ref": "#/$defs/nonnegative"},
+        "page_cache_harm_bytes": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "validity_ledger": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/ledger"}
+    }
+  },
+  "$defs": {
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "canonical_bytes", "digest"],
+      "properties": {
+        "count": {"$ref": "#/$defs/nonnegative"},
+        "canonical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operations", "bytes", "errors", "cumulative_ns"],
+      "properties": {
+        "operations": {"$ref": "#/$defs/nonnegative"},
+        "bytes": {"$ref": "#/$defs/nonnegative"},
+        "errors": {"$ref": "#/$defs/nonnegative"},
+        "cumulative_ns": {"$ref": "#/$defs/nonnegative"},
+        "histogram": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/nonnegative"}
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "bytes"],
+      "properties": {
+        "files": {"$ref": "#/$defs/nonnegative"},
+        "bytes": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "owner"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["info", "warning", "error"]},
+        "owner": {"const": "candidate"},
+        "message": {"type": "string"}
+      }
+    }
+  }
+}

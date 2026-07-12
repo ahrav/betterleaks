@@ -1,0 +1,390 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betterleaks.dev/schema/filescan/result-v1.json",
+  "title": "Betterleaks filesystem benchmark raw result row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "study_id", "phase", "plan_sha256", "binary_sha256",
+    "manifest_sha256", "stratum_id", "workload_class", "evidence_role", "cache_state",
+    "allowed_exit_codes", "block_index",
+    "block_attempt", "sequence_id", "sequence_position", "candidate_id", "started",
+    "command", "working_directory", "environment_overrides", "environment_sha256",
+    "exit", "wait_resource_usage", "procfs", "host", "validity", "block_validity"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "study_id": {"type": "string"},
+    "phase": {"enum": ["calibration", "pilot", "confirmation"]},
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "binary_sha256": {"$ref": "#/$defs/sha256"},
+    "artifacts": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/artifact"}},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "stratum_id": {"type": "string"},
+    "workload_class": {"type": "string"},
+    "evidence_role": {"enum": ["performance", "correctness"]},
+    "cache_state": {"type": "string"},
+    "allowed_exit_codes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 0, "maximum": 255}
+    },
+    "block_index": {"$ref": "#/$defs/nonnegative"},
+    "block_attempt": {"$ref": "#/$defs/nonnegative"},
+    "sequence_id": {"$ref": "#/$defs/nonnegative"},
+    "sequence_position": {"$ref": "#/$defs/nonnegative"},
+    "candidate_id": {"type": "string"},
+    "metrics_candidate_expected": {"type": "string"},
+    "started": {"type": "boolean"},
+    "start_utc": {"type": "string", "format": "date-time"},
+    "end_utc": {"type": "string", "format": "date-time"},
+    "wall_ns": {"$ref": "#/$defs/nonnegative"},
+    "command": {"type": "array", "items": {"type": "string"}},
+    "working_directory": {"type": "string"},
+    "environment_overrides": {"type": "object", "additionalProperties": {"type": "string"}},
+    "environment_sha256": {"$ref": "#/$defs/sha256"},
+    "exit": {"$ref": "#/$defs/exit"},
+    "wait_resource_usage": {"$ref": "#/$defs/wait_resource_usage"},
+    "procfs": {"$ref": "#/$defs/procfs"},
+    "host": {"$ref": "#/$defs/host"},
+    "hooks": {"type": "array", "items": {"$ref": "#/$defs/hook_result"}},
+    "live_guard_before": {"$ref": "#/$defs/live_guard"},
+    "live_guard_after": {"$ref": "#/$defs/live_guard"},
+    "scanner_metrics": {"$ref": "https://betterleaks.dev/schema/filescan/scanner-metrics-v1.json"},
+    "scanner_metrics_sha256": {"$ref": "#/$defs/sha256"},
+    "stdout": {"type": "string"},
+    "stdout_truncated": {"type": "boolean"},
+    "stderr": {"type": "string"},
+    "stderr_truncated": {"type": "boolean"},
+    "validity": {"enum": ["valid", "invalid_candidate", "invalid_infrastructure"]},
+    "block_validity": {"enum": ["valid", "invalid_infrastructure"]},
+    "validity_ledger": {"type": "array", "items": {"$ref": "#/$defs/ledger"}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"started": {"const": true}}, "required": ["started"]},
+      "then": {"required": ["start_utc", "end_utc", "wall_ns"]}
+    },
+    {
+      "if": {"properties": {"evidence_role": {"const": "performance"}}, "required": ["evidence_role"]},
+      "then": {"properties": {"allowed_exit_codes": {"const": [0]}}}
+    },
+    {
+      "if": {
+        "properties": {"phase": {"enum": ["pilot", "confirmation"]}},
+        "required": ["phase"]
+      },
+      "then": {"required": ["artifacts"]}
+    }
+  ],
+  "$defs": {
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "argv": {"type": "array", "items": {"type": "string"}},
+    "environment": {"type": "object", "additionalProperties": {"type": "string"}},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "owner"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["info", "warning", "error"]},
+        "owner": {"enum": ["candidate", "infrastructure", "harness"]},
+        "message": {"type": "string"}
+      }
+    },
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "timed_out"],
+      "properties": {
+        "code": {"type": "integer"},
+        "signal": {"type": "string"},
+        "timed_out": {"type": "boolean"},
+        "wait_error": {"type": "string"}
+      }
+    },
+    "wait_resource_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "user_cpu_ns", "system_cpu_ns", "max_rss_bytes", "minor_faults",
+        "major_faults", "voluntary_context_switches", "involuntary_context_switches"
+      ],
+      "properties": {
+        "scope": {"type": "string"},
+        "user_cpu_ns": {"$ref": "#/$defs/nonnegative"},
+        "system_cpu_ns": {"$ref": "#/$defs/nonnegative"},
+        "max_rss_bytes": {"$ref": "#/$defs/nonnegative"},
+        "minor_faults": {"$ref": "#/$defs/nonnegative"},
+        "major_faults": {"$ref": "#/$defs/nonnegative"},
+        "voluntary_context_switches": {"$ref": "#/$defs/nonnegative"},
+        "involuntary_context_switches": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "procfs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "sample_interval_ms", "samples", "sample_errors", "peak_processes",
+        "peak_aggregate_rss_bytes", "peak_aggregate_vsz_bytes", "process_tree_minor_faults",
+        "process_tree_major_faults", "process_tree_user_ticks", "process_tree_system_ticks",
+        "process_tree_read_syscalls", "process_tree_write_syscalls", "process_tree_read_chars",
+        "process_tree_write_chars", "process_tree_storage_read_bytes", "process_tree_storage_write_bytes"
+      ],
+      "properties": {
+        "scope": {"type": "string"},
+        "sample_interval_ms": {"$ref": "#/$defs/nonnegative"},
+        "samples": {"$ref": "#/$defs/nonnegative"},
+        "sample_errors": {"$ref": "#/$defs/nonnegative"},
+        "peak_processes": {"$ref": "#/$defs/nonnegative"},
+        "peak_aggregate_rss_bytes": {"$ref": "#/$defs/nonnegative"},
+        "peak_aggregate_vsz_bytes": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_minor_faults": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_major_faults": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_user_ticks": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_system_ticks": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_read_syscalls": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_write_syscalls": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_read_chars": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_write_chars": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_storage_read_bytes": {"$ref": "#/$defs/nonnegative"},
+        "process_tree_storage_write_bytes": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "source_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "delta_available", "samples", "sample_errors"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "delta_available": {"type": "boolean"},
+        "samples": {"$ref": "#/$defs/nonnegative"},
+        "sample_errors": {"$ref": "#/$defs/nonnegative"},
+        "unavailable_reason": {"type": "string"},
+        "error_examples": {"type": "array", "maxItems": 5, "items": {"type": "string"}}
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "sample_interval_ms", "sampling_rounds", "sample_errors",
+        "corpus_device", "diskstats", "vmstat", "meminfo", "pressure_io"
+      ],
+      "properties": {
+        "scope": {"const": "corpus_device_and_host_global_observations_not_process_attributed"},
+        "sample_interval_ms": {"$ref": "#/$defs/nonnegative"},
+        "sampling_rounds": {"$ref": "#/$defs/nonnegative"},
+        "sample_errors": {"$ref": "#/$defs/nonnegative"},
+        "corpus_device": {"$ref": "#/$defs/corpus_device"},
+        "diskstats": {"$ref": "#/$defs/diskstats"},
+        "vmstat": {"$ref": "#/$defs/vmstat"},
+        "meminfo": {"$ref": "#/$defs/meminfo"},
+        "pressure_io": {"$ref": "#/$defs/pressure"}
+      }
+    },
+    "corpus_device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "root", "available", "major", "minor"],
+      "properties": {
+        "scope": {"const": "filesystem_root_st_dev"},
+        "root": {"type": "string"},
+        "available": {"type": "boolean"},
+        "major": {"$ref": "#/$defs/nonnegative"},
+        "minor": {"$ref": "#/$defs/nonnegative"},
+        "major_minor": {"type": "string", "pattern": "^[0-9]+:[0-9]+$"},
+        "resolve_error": {"type": "string"}
+      }
+    },
+    "diskstats_counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read_sectors", "write_sectors", "io_milliseconds", "weighted_io_milliseconds", "in_flight"],
+      "properties": {
+        "read_sectors": {"$ref": "#/$defs/nonnegative"},
+        "write_sectors": {"$ref": "#/$defs/nonnegative"},
+        "io_milliseconds": {"$ref": "#/$defs/nonnegative"},
+        "weighted_io_milliseconds": {"$ref": "#/$defs/nonnegative"},
+        "in_flight": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "diskstats_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read_sectors", "write_sectors", "io_milliseconds", "weighted_io_milliseconds", "counter_reset"],
+      "properties": {
+        "read_sectors": {"$ref": "#/$defs/nonnegative"},
+        "write_sectors": {"$ref": "#/$defs/nonnegative"},
+        "io_milliseconds": {"$ref": "#/$defs/nonnegative"},
+        "weighted_io_milliseconds": {"$ref": "#/$defs/nonnegative"},
+        "counter_reset": {"type": "boolean"}
+      }
+    },
+    "diskstats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "peak_in_flight"],
+      "properties": {
+        "scope": {"const": "corpus_device_only"},
+        "status": {"$ref": "#/$defs/source_status"},
+        "device_name": {"type": "string"},
+        "start": {"$ref": "#/$defs/diskstats_counters"},
+        "end": {"$ref": "#/$defs/diskstats_counters"},
+        "delta": {"$ref": "#/$defs/diskstats_delta"},
+        "peak_in_flight": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "vmstat_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file_pages", "workingset_refault_file", "page_in_kib", "page_out_kib"],
+      "properties": {
+        "file_pages": {"$ref": "#/$defs/nonnegative"},
+        "workingset_refault_file": {"$ref": "#/$defs/nonnegative"},
+        "page_in_kib": {"$ref": "#/$defs/nonnegative"},
+        "page_out_kib": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "vmstat_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file_pages", "workingset_refault_file", "page_in_kib", "page_out_kib", "counter_reset"],
+      "properties": {
+        "file_pages": {"type": "integer"},
+        "workingset_refault_file": {"$ref": "#/$defs/nonnegative"},
+        "page_in_kib": {"$ref": "#/$defs/nonnegative"},
+        "page_out_kib": {"$ref": "#/$defs/nonnegative"},
+        "counter_reset": {"type": "boolean"}
+      }
+    },
+    "vmstat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status"],
+      "properties": {
+        "scope": {"const": "host_global_not_process_attributed"},
+        "status": {"$ref": "#/$defs/source_status"},
+        "start": {"$ref": "#/$defs/vmstat_snapshot"},
+        "end": {"$ref": "#/$defs/vmstat_snapshot"},
+        "delta": {"$ref": "#/$defs/vmstat_delta"}
+      }
+    },
+    "meminfo_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cached_bytes", "sreclaimable_bytes", "dirty_bytes", "writeback_bytes", "mem_available_bytes"],
+      "properties": {
+        "cached_bytes": {"$ref": "#/$defs/nonnegative"},
+        "sreclaimable_bytes": {"$ref": "#/$defs/nonnegative"},
+        "dirty_bytes": {"$ref": "#/$defs/nonnegative"},
+        "writeback_bytes": {"$ref": "#/$defs/nonnegative"},
+        "mem_available_bytes": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "meminfo_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cached_bytes", "sreclaimable_bytes", "dirty_bytes", "writeback_bytes", "mem_available_bytes"],
+      "properties": {
+        "cached_bytes": {"type": "integer"},
+        "sreclaimable_bytes": {"type": "integer"},
+        "dirty_bytes": {"type": "integer"},
+        "writeback_bytes": {"type": "integer"},
+        "mem_available_bytes": {"type": "integer"}
+      }
+    },
+    "meminfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status"],
+      "properties": {
+        "scope": {"const": "host_global_not_process_attributed"},
+        "status": {"$ref": "#/$defs/source_status"},
+        "start": {"$ref": "#/$defs/meminfo_snapshot"},
+        "end": {"$ref": "#/$defs/meminfo_snapshot"},
+        "delta": {"$ref": "#/$defs/meminfo_delta"}
+      }
+    },
+    "pressure_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["some_total_microseconds"],
+      "properties": {
+        "some_total_microseconds": {"$ref": "#/$defs/nonnegative"},
+        "full_total_microseconds": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "pressure_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["some_total_microseconds", "counter_reset"],
+      "properties": {
+        "some_total_microseconds": {"$ref": "#/$defs/nonnegative"},
+        "full_total_microseconds": {"$ref": "#/$defs/nonnegative"},
+        "counter_reset": {"type": "boolean"}
+      }
+    },
+    "pressure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status"],
+      "properties": {
+        "scope": {"const": "host_global_not_process_attributed"},
+        "status": {"$ref": "#/$defs/source_status"},
+        "start": {"$ref": "#/$defs/pressure_snapshot"},
+        "end": {"$ref": "#/$defs/pressure_snapshot"},
+        "delta": {"$ref": "#/$defs/pressure_delta"}
+      }
+    },
+    "hook_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command", "environment_sha256", "wall_ns", "exit_code", "timed_out"],
+      "properties": {
+        "id": {"type": "string"},
+        "command": {"$ref": "#/$defs/argv"},
+        "environment_overrides": {"$ref": "#/$defs/environment"},
+        "environment_sha256": {"$ref": "#/$defs/sha256"},
+        "wall_ns": {"$ref": "#/$defs/nonnegative"},
+        "exit_code": {"type": "integer"},
+        "timed_out": {"type": "boolean"},
+        "stdout": {"type": "string"},
+        "stdout_truncated": {"type": "boolean"},
+        "stderr": {"type": "string"},
+        "stderr_truncated": {"type": "boolean"}
+      }
+    },
+    "live_guard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "manifest_path", "root", "mode", "valid"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "manifest_path": {"type": "string"},
+        "root": {"type": "string"},
+        "mode": {"enum": ["live", "portable", "sidecar", "all"]},
+        "valid": {"type": "boolean"},
+        "expected_portable_content_digest": {"$ref": "#/$defs/sha256"},
+        "observed_portable_content_digest": {"$ref": "#/$defs/sha256"},
+        "expected_live_guard_digest": {"$ref": "#/$defs/sha256"},
+        "observed_live_guard_digest": {"$ref": "#/$defs/sha256"},
+        "expected_entries_sha256": {"$ref": "#/$defs/sha256"},
+        "observed_entries_sha256": {"$ref": "#/$defs/sha256"},
+        "observed_summary": {"type": "object"},
+        "validity_ledger": {"type": "array", "items": {"$ref": "#/$defs/ledger"}}
+      }
+    }
+  }
+}

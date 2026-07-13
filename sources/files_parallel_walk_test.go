@@ -136,6 +136,55 @@ func TestScanTargetsParallelEquivalence(t *testing.T) {
 	}
 }
 
+// TestScanTargetsDeferredStat pins the deferred-metadata contract: on the
+// default path (no filescan experiment, no max-size gate) the walkers skip
+// the per-entry lstat, so empty files are emitted (they are filtered at
+// read time by yielding zero fragments) and Size stays zero. Any size
+// consumer (MaxFileSize here; FileScan metrics elsewhere) restores the
+// stat and its empty/too-large gates.
+func TestScanTargetsDeferredStat(t *testing.T) {
+	root, _ := buildWalkTree(t)
+	empty := filepath.Join(root, "empty.txt")
+
+	pathsOf := func(ts []ScanTarget) map[string]ScanTarget {
+		m := make(map[string]ScanTarget, len(ts))
+		for _, st := range ts {
+			m[st.Path] = st
+		}
+		return m
+	}
+
+	t.Run("default emits empty files with zero size", func(t *testing.T) {
+		s := &Files{Path: root}
+		for walker, targets := range map[string][]ScanTarget{
+			"parallel": collectParallel(t, s),
+			"serial":   collectSerial(t, s),
+		} {
+			got := pathsOf(targets)
+			st, ok := got[empty]
+			assert.True(t, ok, "%s: empty file must be emitted when the stat is deferred", walker)
+			assert.Zero(t, st.Size, "%s: deferred stat must leave Size zero", walker)
+		}
+	})
+
+	t.Run("max-file-size restores stat and gates", func(t *testing.T) {
+		s := &Files{Path: root, MaxFileSize: 1024}
+		for walker, targets := range map[string][]ScanTarget{
+			"parallel": collectParallel(t, s),
+			"serial":   collectSerial(t, s),
+		} {
+			got := pathsOf(targets)
+			_, ok := got[empty]
+			assert.False(t, ok, "%s: empty file must be skipped when stat is required", walker)
+			_, ok = got[filepath.Join(root, "big.bin")]
+			assert.False(t, ok, "%s: over-size file must be skipped", walker)
+			st, ok := got[filepath.Join(root, "top.txt")]
+			require.True(t, ok, "%s: regular file must be emitted", walker)
+			assert.Equal(t, int64(10), st.Size, "%s: stat mode must populate Size", walker)
+		}
+	})
+}
+
 // TestScanTargetsParallelEdgeRoots covers the root shapes that bypass or
 // stress the worker pool: single-file root, missing root, empty dir root.
 func TestScanTargetsParallelEdgeRoots(t *testing.T) {

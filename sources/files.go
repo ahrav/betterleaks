@@ -39,73 +39,79 @@ type Files struct {
 
 // scanTargets yields scan targets to a callback func
 func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) error) error {
+	// Per-entry metadata (lstat via d.Info) is needed only when something
+	// consumes the size: the filescan experiment's metrics and backends, or
+	// an explicit max-size gate. The default path skips the stat entirely;
+	// empty files are discovered at open time and yield no fragments.
+	needStat := s.FileScan != nil || s.MaxFileSize > 0
 	return filepath.WalkDir(s.Path, func(path string, d fs.DirEntry, err error) error {
 		scanTarget := ScanTarget{Path: path}
-		logger := logging.With().Str("path", path).Logger()
 
 		if err != nil {
 			if os.IsPermission(err) {
 				// This seems to only fail on directories at this stage.
-				logger.Warn().Err(errors.New("permission denied")).Msg("skipping directory")
+				logging.Warn().Str("path", path).Err(errors.New("permission denied")).Msg("skipping directory")
 				return filepath.SkipDir
 			}
-			logger.Warn().Err(err).Msg("skipping")
+			logging.Warn().Str("path", path).Err(err).Msg("skipping")
 			return nil
 		}
-		metadataStart := time.Time{}
-		if s.fileScanMetrics() != nil {
-			metadataStart = time.Now()
-		}
-		info, err := d.Info()
-		if !metadataStart.IsZero() {
-			s.fileScanMetrics().RecordPhase(FileScanPhaseMetadata, 0, err, time.Since(metadataStart))
-		}
-		if err != nil {
-			if d.IsDir() {
-				logger.Error().Err(err).Msg("skipping directory: could not get info")
-				return filepath.SkipDir
+		if needStat {
+			metadataStart := time.Time{}
+			if s.fileScanMetrics() != nil {
+				metadataStart = time.Now()
 			}
-			logger.Error().Err(err).Msg("skipping file: could not get info")
-			return nil
-		}
-		scanTarget.Size = info.Size()
-
-		if !d.IsDir() {
-			// Empty; nothing to do here.
-			if info.Size() == 0 {
-				logger.Debug().Msg("skipping empty file")
+			info, err := d.Info()
+			if !metadataStart.IsZero() {
+				s.fileScanMetrics().RecordPhase(FileScanPhaseMetadata, 0, err, time.Since(metadataStart))
+			}
+			if err != nil {
+				if d.IsDir() {
+					logging.Error().Str("path", path).Err(err).Msg("skipping directory: could not get info")
+					return filepath.SkipDir
+				}
+				logging.Error().Str("path", path).Err(err).Msg("skipping file: could not get info")
 				return nil
 			}
+			scanTarget.Size = info.Size()
 
-			// Too large; nothing to do here.
-			if s.MaxFileSize > 0 && info.Size() > int64(s.MaxFileSize) {
-				logger.Warn().Msgf(
-					"skipping file: too large max_size=%dMB, size=%dMB",
-					s.MaxFileSize/1_000_000, info.Size()/1_000_000,
-				)
-				return nil
+			if !d.IsDir() {
+				// Empty; nothing to do here.
+				if info.Size() == 0 {
+					logging.Debug().Str("path", path).Msg("skipping empty file")
+					return nil
+				}
+
+				// Too large; nothing to do here.
+				if s.MaxFileSize > 0 && info.Size() > int64(s.MaxFileSize) {
+					logging.Warn().Str("path", path).Msgf(
+						"skipping file: too large max_size=%dMB, size=%dMB",
+						s.MaxFileSize/1_000_000, info.Size()/1_000_000,
+					)
+					return nil
+				}
 			}
 		}
 
 		// set the initial scan target values
 		if d.Type() == fs.ModeSymlink {
 			if !s.FollowSymlinks {
-				logger.Debug().Msg("skipping symlink: follow symlinks disabled")
+				logging.Debug().Str("path", path).Msg("skipping symlink: follow symlinks disabled")
 				return nil
 			}
 			realPath, err := filepath.EvalSymlinks(path)
 			if err != nil {
-				logger.Error().Err(err).Msg("skipping symlink: could not evaluate")
+				logging.Error().Str("path", path).Err(err).Msg("skipping symlink: could not evaluate")
 				return nil
 			}
 			realPathFileInfo, statErr := os.Stat(realPath)
 			if statErr != nil {
-				logger.Error().Err(statErr).Msg("skipping symlink: could not stat target")
+				logging.Error().Str("path", path).Err(statErr).Msg("skipping symlink: could not stat target")
 				s.fileScanMetrics().RecordLedger("symlink_stat_error", path, statErr.Error())
 				return nil
 			}
 			if realPathFileInfo.IsDir() {
-				logger.Debug().Str("target", realPath).Msgf("skipping symlink: target is directory")
+				logging.Debug().Str("path", path).Str("target", realPath).Msgf("skipping symlink: target is directory")
 				return nil
 			}
 			scanTarget = ScanTarget{
@@ -116,16 +122,16 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 		}
 
 		// handle dir cases (mainly just see if it should be skipped
-		if info.IsDir() {
+		if d.IsDir() {
 			if shouldSkipPath(s.ShouldSkip, path) {
-				logger.Debug().Msg("skipping directory: global allowlist")
+				logging.Debug().Str("path", path).Msg("skipping directory: global allowlist")
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
 		if shouldSkipPath(s.ShouldSkip, path) {
-			logger.Debug().Msg("skipping file: global allowlist")
+			logging.Debug().Str("path", path).Msg("skipping file: global allowlist")
 			return nil
 		}
 
@@ -167,8 +173,7 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	}
 
 	scanFile := func(scanTarget ScanTarget) error {
-		logger := logging.With().Str("path", scanTarget.Path).Logger()
-		logger.Trace().Msg("scanning path")
+		logging.Trace().Str("path", scanTarget.Path).Msg("scanning path")
 		local := metrics.NewLocal()
 		if metrics != nil {
 			metrics.AddGauge(FileScanGaugeActiveFiles, 1)
@@ -198,7 +203,7 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		if err != nil {
 			metrics.RecordLedger("open_error", scanTarget.Path, err.Error())
 			if os.IsPermission(err) {
-				logger.Warn().Msg("skipping file: permission denied")
+				logging.Warn().Str("path", scanTarget.Path).Msg("skipping file: permission denied")
 			}
 			if cfg != nil {
 				return err
@@ -533,11 +538,10 @@ func (s *Files) scanTargetsParallel(ctx context.Context, emit func(ScanTarget)) 
 		// filepath.WalkDir invokes its callback with the root error and the
 		// original scanTargets logged and swallowed it (returning nil), so a
 		// missing or unreadable root is a no-op scan, not a hard error.
-		logger := logging.With().Str("path", s.Path).Logger()
 		if os.IsPermission(err) {
-			logger.Warn().Err(errors.New("permission denied")).Msg("skipping directory")
+			logging.Warn().Str("path", s.Path).Err(errors.New("permission denied")).Msg("skipping directory")
 		} else {
-			logger.Warn().Err(err).Msg("skipping")
+			logging.Warn().Str("path", s.Path).Err(err).Msg("skipping")
 		}
 		return nil
 	}
@@ -611,8 +615,7 @@ func (s *Files) walkDir(ctx context.Context, dir string, emit func(ScanTarget)) 
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		logger := logging.With().Str("path", dir).Logger()
-		logger.Warn().Err(err).Msg("skipping directory")
+		logging.Warn().Str("path", dir).Err(err).Msg("skipping directory")
 		return nil
 	}
 
@@ -637,43 +640,49 @@ func (s *Files) walkDir(ctx context.Context, dir string, emit func(ScanTarget)) 
 // too-large, symlink handling, allowlist) and emits a ScanTarget when the file
 // should be scanned.
 func (s *Files) emitTarget(ctx context.Context, path string, d fs.DirEntry, emit func(ScanTarget)) {
-	logger := logging.With().Str("path", path).Logger()
-	metadataStart := time.Time{}
-	if s.fileScanMetrics() != nil {
-		metadataStart = time.Now()
-	}
-	info, err := d.Info()
-	if !metadataStart.IsZero() {
-		s.fileScanMetrics().RecordPhase(FileScanPhaseMetadata, 0, err, time.Since(metadataStart))
-	}
-	if err != nil {
-		logger.Error().Err(err).Msg("skipping file: could not get info")
-		s.fileScanMetrics().RecordLedger("metadata_error", path, err.Error())
-		return
+	scanTarget := ScanTarget{Path: path}
+	// Mirror scanTargets: stat only when the size is consumed (filescan
+	// experiment metrics/backends, or an explicit max-size gate). On the
+	// default path this saves one lstat per file; empty files are discovered
+	// at open time and yield no fragments.
+	if s.FileScan != nil || s.MaxFileSize > 0 {
+		metadataStart := time.Time{}
+		if s.fileScanMetrics() != nil {
+			metadataStart = time.Now()
+		}
+		info, err := d.Info()
+		if !metadataStart.IsZero() {
+			s.fileScanMetrics().RecordPhase(FileScanPhaseMetadata, 0, err, time.Since(metadataStart))
+		}
+		if err != nil {
+			logging.Error().Str("path", path).Err(err).Msg("skipping file: could not get info")
+			s.fileScanMetrics().RecordLedger("metadata_error", path, err.Error())
+			return
+		}
+
+		if info.Size() == 0 {
+			return
+		}
+		if s.MaxFileSize > 0 && info.Size() > int64(s.MaxFileSize) {
+			logging.Warn().Str("path", path).Msgf("skipping file: too large max_size=%dMB, size=%dMB",
+				s.MaxFileSize/1_000_000, info.Size()/1_000_000)
+			return
+		}
+		scanTarget.Size = info.Size()
 	}
 
-	if info.Size() == 0 {
-		return
-	}
-	if s.MaxFileSize > 0 && info.Size() > int64(s.MaxFileSize) {
-		logger.Warn().Msgf("skipping file: too large max_size=%dMB, size=%dMB",
-			s.MaxFileSize/1_000_000, info.Size()/1_000_000)
-		return
-	}
-
-	scanTarget := ScanTarget{Path: path, Size: info.Size()}
 	if d.Type() == fs.ModeSymlink {
 		if !s.FollowSymlinks {
 			return
 		}
 		realPath, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			logger.Error().Err(err).Msg("skipping symlink: could not evaluate")
+			logging.Error().Str("path", path).Err(err).Msg("skipping symlink: could not evaluate")
 			return
 		}
 		realPathFileInfo, statErr := os.Stat(realPath)
 		if statErr != nil {
-			logger.Error().Err(statErr).Msg("skipping symlink: could not stat target")
+			logging.Error().Str("path", path).Err(statErr).Msg("skipping symlink: could not stat target")
 			s.fileScanMetrics().RecordLedger("symlink_stat_error", path, statErr.Error())
 			return
 		}

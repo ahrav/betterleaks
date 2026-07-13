@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	ahocorasick "github.com/BobuSumisu/aho-corasick"
 	"github.com/betterleaks/betterleaks/config"
 	"github.com/betterleaks/betterleaks/report"
 	"github.com/betterleaks/betterleaks/sources"
@@ -256,6 +257,85 @@ func TestRuleWindowsFromPositionsEquivalence(t *testing.T) {
 			}
 			// Recorder captures every occurrence; cross-check with a
 			// simple scan before comparing window construction.
+			var wantPos []int32
+			for from := 0; ; {
+				idx := strings.Index(string(buf[from:]), keywords[pat])
+				if idx < 0 {
+					break
+				}
+				wantPos = append(wantPos, int32(from+idx))
+				from += idx + 1
+			}
+			if len(positions) != len(wantPos) {
+				t.Fatalf("trial %d kw %q: recorder %v want %v", trial, keywords[pat], positions, wantPos)
+			}
+			for i := range positions {
+				if positions[i] != wantPos[i] {
+					t.Fatalf("trial %d kw %q: recorder %v want %v", trial, keywords[pat], positions, wantPos)
+				}
+			}
+			if len(positions) == 0 {
+				continue
+			}
+			got, ok := ruleWindowsFromPositions(rec, []uint32{uint32(pat)}, kwLen, len(buf), width)
+			if !ok {
+				t.Fatalf("trial %d kw %q: unexpected overflow signal", trial, keywords[pat])
+			}
+			want := ruleWindows(buf, [][]byte{kwBytes[pat]}, width)
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("trial %d kw %q width %d:\nrecorded: %v\nindex:    %v", trial, keywords[pat], width, got, want)
+			}
+		}
+	}
+}
+
+// TestAhoCRecordedPositionsEquivalence pins the AhoC Walk-fed recorder to a
+// naive occurrence scan: for every tracked pattern whose list stays complete,
+// the recorded start offsets must equal every occurrence of the keyword, and
+// the windows built from them must match the bytes.Index builder. This is
+// the ahoc-path twin of TestRuleWindowsFromPositionsEquivalence — Walk
+// reports (end, length, pattern), the detector records end+1-n.
+func TestAhoCRecordedPositionsEquivalence(t *testing.T) {
+	keywords := defaultKeywords(t)
+	trie := ahocorasick.NewTrieBuilder().AddStrings(keywords).Build()
+	kwLen := make([]int32, len(keywords))
+	kwBytes := make([][]byte, len(keywords))
+	for i, kw := range keywords {
+		kwLen[i] = int32(len(kw))
+		kwBytes[i] = []byte(kw)
+	}
+	trackAll := make([]bool, len(keywords))
+	for i := range trackAll {
+		trackAll[i] = true
+	}
+
+	rng := rand.New(rand.NewSource(7))
+	alpha := "abcdefghijklmnopqrstuvwxyz0123456789-_. \n\t=\"'"
+	for trial := 0; trial < 500; trial++ {
+		n := 64 + rng.Intn(4096)
+		buf := make([]byte, n)
+		for i := range buf {
+			buf[i] = alpha[rng.Intn(len(alpha))]
+		}
+		for k := rng.Intn(8); k > 0; k-- {
+			kw := keywords[rng.Intn(len(keywords))]
+			if len(kw) <= n {
+				copy(buf[rng.Intn(n-len(kw)+1):], kw)
+			}
+		}
+
+		rec := newOccRecorder(len(keywords), trackAll)
+		trie.Walk(buf, func(end, l, pattern uint32) bool {
+			rec.record(pattern, int32(end+1-l))
+			return true
+		})
+
+		width := 32 + rng.Intn(512)
+		for pat := range keywords {
+			positions, complete := rec.positions(uint32(pat))
+			if !complete {
+				continue // overflow: caller falls back, nothing to compare
+			}
 			var wantPos []int32
 			for from := 0; ; {
 				idx := strings.Index(string(buf[from:]), keywords[pat])

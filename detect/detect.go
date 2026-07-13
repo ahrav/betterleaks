@@ -869,10 +869,25 @@ ScanLoop:
 				lowerBufPtr, lowerBuf = getLowerBuf(currentRaw)
 				switch d.prefilterMode {
 				case prefilterAhoC:
-					d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
-						markPattern(pattern)
-						return true
-					})
+					// Walk reports every occurrence (end, length, pattern);
+					// for fragments large enough to be windowed, record the
+					// start offsets so window construction can skip the
+					// bytes.Index rediscovery — same contract as the trigram
+					// recorder: a pattern's list feeds windows only while
+					// complete (record handles cap overflow).
+					if !d.windowingDisabled && len(currentRaw) >= windowMinFragment {
+						occRec = getOccRecorder(len(d.windowTrackPatterns), d.windowTrackPatterns)
+						d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
+							markPattern(pattern)
+							occRec.record(pattern, int32(end+1-n))
+							return true
+						})
+					} else {
+						d.prefilter.Walk(lowerBuf, func(end, n, pattern uint32) bool {
+							markPattern(pattern)
+							return true
+						})
+					}
 				case prefilterRE2Set:
 					for _, pattern := range d.prefilterSet.FindAll(lowerBuf, -1) {
 						markPattern(uint32(pattern))

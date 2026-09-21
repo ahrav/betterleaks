@@ -13,17 +13,15 @@ import (
 
 const defaultBufferSize = 100 * 1_000 // 100 KB
 
+// maxIdleBuffers bounds the read buffers kept for reuse: 256 x 125 KB = 32 MB.
+// A channel free list (rather than sync.Pool) survives garbage collections.
+// Scans allocate a fresh Fragment.Raw per chunk, so the collector runs often
+// and sync.Pool would drop every idle buffer each cycle and re-allocate them.
+const maxIdleBuffers = 256
+
 var (
-	bufferPool = sync.Pool{
-		New: func() any {
-			// Keep lookahead in the same reusable backing array as the initial
-			// read. Fragment.Raw receives one exact-sized string copy before the
-			// buffer returns to the pool.
-			buffer := make([]byte, defaultBufferSize, defaultBufferSize+maxPeekSize)
-			return &buffer
-		},
-	}
-	readerPool = sync.Pool{
+	idleBuffers = make(chan []byte, maxIdleBuffers)
+	readerPool  = sync.Pool{
 		New: func() any {
 			// Match bufio.NewReader's default size to preserve chunk boundaries
 			// when readUntilSafeBoundary reads ahead.
@@ -134,12 +132,25 @@ func readerFragments(ctx context.Context, content io.Reader, buffer []byte, yiel
 }
 
 func getBuffer() []byte {
-	return *bufferPool.Get().(*[]byte)
+	select {
+	case buffer := <-idleBuffers:
+		return buffer
+	default:
+		// Keep lookahead in the same reusable backing array as the initial
+		// read. Fragment.Raw receives one exact-sized string copy before the
+		// buffer returns to the free list.
+		return make([]byte, defaultBufferSize, defaultBufferSize+maxPeekSize)
+	}
 }
 
 func putBuffer(buffer []byte) {
-	buffer = buffer[:defaultBufferSize]
-	bufferPool.Put(&buffer)
+	if cap(buffer) < defaultBufferSize+maxPeekSize {
+		return
+	}
+	select {
+	case idleBuffers <- buffer[:defaultBufferSize]:
+	default:
+	}
 }
 
 func getReader(reader io.Reader) *bufio.Reader {

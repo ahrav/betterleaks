@@ -1313,8 +1313,12 @@ func (d *Detector) detectFragmentWithRule(ruleTimings *ruletiming.Collector,
 		}
 
 		// Set the value of |secret|, if the pattern contains at least one capture group.
-		// (The first element is the full match, hence we check >= 2.)
-		groups := r.regex.FindStringSubmatch(finding.Secret)
+		// (The first element is the full match, hence we check >= 2.) A pattern
+		// without groups cannot change the secret, so skip the second match.
+		var groups []string
+		if r.regex.NumSubexp() > 0 {
+			groups = r.regex.FindStringSubmatch(finding.Secret)
+		}
 		if len(groups) >= 2 {
 			if r.rule.SecretGroup > 0 {
 				if len(groups) <= r.rule.SecretGroup {
@@ -1333,10 +1337,12 @@ func (d *Detector) detectFragmentWithRule(ruleTimings *ruletiming.Collector,
 			}
 
 			// Extract named capture groups for use as template variables.
-			names := r.regex.SubexpNames()
-			captures := make(map[string]string)
-			for i, name := range names {
+			var captures map[string]string
+			for i, name := range r.regex.SubexpNames() {
 				if i > 0 && name != "" && i < len(groups) && groups[i] != "" {
+					if captures == nil {
+						captures = make(map[string]string)
+					}
 					captures[name] = strings.Clone(groups[i])
 				}
 			}

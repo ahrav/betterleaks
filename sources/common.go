@@ -92,38 +92,49 @@ func readUntilSafeBoundary(r *bufio.Reader, data []byte, initialSize int, maxPee
 		copy(grown, data)
 		data = grown
 	}
+	// The count restarts from the buffer's final byte, as the byte-at-a-time
+	// loop did when it inspected that byte before its first read.
 	newlineCount = 0
+	if data[len(data)-1] == '\n' {
+		newlineCount = 1
+	}
 	for {
-		// Check if the last character is a newline.
-		lastChar = data[len(data)-1]
-		if lastChar == '\n' {
-			newlineCount++
-
-			// Stop if two consecutive newlines are found
-			if newlineCount >= 2 {
-				break
-			}
-		} else if isWhitespace[lastChar] {
-			// The presence of other whitespace characters (`\r`, ` `, `\t`) shouldn't reset the count.
-			// (Intentionally do nothing.)
-		} else {
-			newlineCount = 0 // Reset if a non-newline character is found
-		}
-
 		// Stop growing the buffer if it reaches maxSize
-		if (len(data) - initialSize) >= maxPeekSize {
-			break
+		budget := maxPeekSize - (len(data) - initialSize)
+		if budget <= 0 {
+			return data, nil
 		}
-
-		// Read additional data into a temporary buffer
-		b, err := r.ReadByte()
+		// Peek at the buffered bytes and consume only up to the boundary, so
+		// the bytes after it stay in the reader for the next chunk. This
+		// scans whole buffers instead of taking one byte per call.
+		peek, err := r.Peek(min(budget, r.Size()))
+		consumed := 0
+		found := false
+		for _, b := range peek {
+			consumed++
+			if b == '\n' {
+				newlineCount++
+				if newlineCount >= 2 {
+					found = true
+					break
+				}
+			} else if !isWhitespace[b] {
+				// The presence of other whitespace characters (`\r`, ` `, `\t`) shouldn't reset the count.
+				newlineCount = 0
+			}
+		}
+		data = append(data, peek[:consumed]...)
+		if _, discardErr := r.Discard(consumed); discardErr != nil {
+			return data, discardErr
+		}
+		if found {
+			return data, nil
+		}
 		if err != nil {
 			if err == io.EOF {
-				break
+				return data, nil
 			}
 			return data, err
 		}
-		data = append(data, b)
 	}
-	return data, nil
 }

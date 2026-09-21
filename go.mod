@@ -60,3 +60,5 @@ require (
 	golang.org/x/text v0.39.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/betterleaks/go-re2 => github.com/ahrav/go-re2 v0.0.0-20260921071925-00d99183977e

@@ -274,6 +274,16 @@ type ruleCandidates struct {
 	// Indexes match rulesBySpecificity, preserving rule order without building
 	// a map and sorted slice for every fragment and decode pass.
 	marked []bool
+	// starts holds, per anchored rule, the offsets in the current text where
+	// one of its leading literals occurs. Entries are unsorted until used.
+	starts [][]int
+}
+
+func (c *ruleCandidates) reset() {
+	clear(c.marked)
+	for i := range c.starts {
+		c.starts[i] = c.starts[i][:0]
+	}
 }
 
 // Detector is an immutable rule engine with thread-safe lazy compilation. A
@@ -333,6 +343,12 @@ type Detector struct {
 	// noKeywordIndexes contains positions in rulesBySpecificity for rules with no
 	// keyword prefilter. These rules are candidates on every scan and decode pass.
 	noKeywordIndexes []int
+
+	// anchorRuleIndexes maps each Aho-Corasick pattern ID to the anchored rules
+	// whose regex can only match starting with that literal. The automaton
+	// holds keywords and leading literals together so one pass over the text
+	// both selects candidate rules and collects their candidate offsets.
+	anchorRuleIndexes [][]int
 
 	// candidatePool reuses bitmaps across detector workers and repeated scans. A
 	// set bit means the rule at the same rulesBySpecificity position should run.
@@ -400,14 +416,41 @@ func NewDetector(cfg *config.Config, options ...Option) (*Detector, error) {
 			}
 		}
 	}
-	keywords := make([]string, 0, len(keywordToRuleIndexes))
-	for keyword := range keywordToRuleIndexes {
-		keywords = append(keywords, keyword)
+	anchorToRuleIndexes := make(map[string][]int)
+	for ruleIndex := range rulesBySpecificity {
+		rule := &rulesBySpecificity[ruleIndex]
+		rule.index = ruleIndex
+		if rule.regex == nil {
+			continue
+		}
+		literals, _, ok := leadingLiterals(rule.rule.Regex)
+		if !ok || !selectiveLiterals(literals) {
+			continue
+		}
+		rule.anchored = true
+		for _, literal := range literals {
+			literal = lowerASCII(literal)
+			indexes := anchorToRuleIndexes[literal]
+			if len(indexes) == 0 || indexes[len(indexes)-1] != ruleIndex {
+				anchorToRuleIndexes[literal] = append(indexes, ruleIndex)
+			}
+		}
 	}
-	sort.Strings(keywords)
-	keywordRuleIndexes := make([][]int, len(keywords))
-	for patternID, keyword := range keywords {
-		keywordRuleIndexes[patternID] = keywordToRuleIndexes[keyword]
+	patterns := make([]string, 0, len(keywordToRuleIndexes)+len(anchorToRuleIndexes))
+	for keyword := range keywordToRuleIndexes {
+		patterns = append(patterns, keyword)
+	}
+	for literal := range anchorToRuleIndexes {
+		if _, isKeyword := keywordToRuleIndexes[literal]; !isKeyword {
+			patterns = append(patterns, literal)
+		}
+	}
+	sort.Strings(patterns)
+	keywordRuleIndexes := make([][]int, len(patterns))
+	anchorRuleIndexes := make([][]int, len(patterns))
+	for patternID, pattern := range patterns {
+		keywordRuleIndexes[patternID] = keywordToRuleIndexes[pattern]
+		anchorRuleIndexes[patternID] = anchorToRuleIndexes[pattern]
 	}
 	d := &Detector{
 		maxDecodeDepth:      settings.maxDecodeDepth,
@@ -422,7 +465,7 @@ func NewDetector(cfg *config.Config, options ...Option) (*Detector, error) {
 		logger:              settings.logger,
 		configPath:          cfg.Path,
 		globalFilterExpr:    cfg.Filter,
-		prefilter:           ahocorasick.Compile(keywords, true),
+		prefilter:           ahocorasick.Compile(patterns, true),
 		exprRuntime:         exprRuntime,
 		validationRuntime:   validationRuntime,
 		validationPrograms:  make(map[string]exprruntime.Program),
@@ -432,6 +475,7 @@ func NewDetector(cfg *config.Config, options ...Option) (*Detector, error) {
 		ruleIndexByID:       ruleIndexByID,
 		keywordRuleIndexes:  keywordRuleIndexes,
 		noKeywordIndexes:    noKeywordIndexes,
+		anchorRuleIndexes:   anchorRuleIndexes,
 	}
 	if len(settings.ignoredFingerprints) > 0 {
 		d.ignoredFingerprints = make(map[fingerprint.Hash]struct{}, len(settings.ignoredFingerprints))
@@ -446,7 +490,10 @@ func NewDetector(cfg *config.Config, options ...Option) (*Detector, error) {
 		}
 	}
 	d.candidatePool.New = func() any {
-		return &ruleCandidates{marked: make([]bool, len(d.rulesBySpecificity))}
+		return &ruleCandidates{
+			marked: make([]bool, len(d.rulesBySpecificity)),
+			starts: make([][]int, len(d.rulesBySpecificity)),
+		}
 	}
 	exprRuntime.SetTokenCounterProvider(d.tokenCounterInstance)
 
@@ -992,9 +1039,12 @@ ScanLoop:
 			candidates := d.candidatePool.Get().(*ruleCandidates)
 			// A rule is a candidate when any of its keywords matched. The bitmap
 			// deduplicates rules referenced by multiple matching keywords.
-			d.prefilter.Visit(currentRaw, func(patternID, _, _ int) bool {
+			d.prefilter.Visit(currentRaw, func(patternID, start, _ int) bool {
 				for _, ruleIndex := range d.keywordRuleIndexes[patternID] {
 					candidates.marked[ruleIndex] = true
+				}
+				for _, ruleIndex := range d.anchorRuleIndexes[patternID] {
+					candidates.starts[ruleIndex] = append(candidates.starts[ruleIndex], start)
 				}
 				return true
 			})
@@ -1010,7 +1060,7 @@ ScanLoop:
 				rule := &d.rulesBySpecificity[ruleIndex]
 				select {
 				case <-ctx.Done():
-					clear(candidates.marked)
+					candidates.reset()
 					d.candidatePool.Put(candidates)
 					break ScanLoop
 				default:
@@ -1020,7 +1070,7 @@ ScanLoop:
 					if rule.regex == nil && (currentDecodeDepth > 0 || fragment.Attr(sources.AttrFSFirstFragment) == "false") {
 						continue
 					}
-					for _, finding := range d.detectFragmentWithRuleTimed(ruleTimings, fragment, currentRaw, rule, encodedSegments, priorFindings, detectionState{}) {
+					for _, finding := range d.detectFragmentWithRuleTimed(ruleTimings, fragment, currentRaw, rule, encodedSegments, priorFindings, detectionState{anchors: candidates}) {
 						// These findings have their components assembled. Recursive
 						// component matching never applies fingerprint suppression.
 						if len(d.ignoredFingerprints) > 0 {
@@ -1037,7 +1087,7 @@ ScanLoop:
 				}
 			}
 			// Pool entries must be blank because later scans may run on any goroutine.
-			clear(candidates.marked)
+			candidates.reset()
 			d.candidatePool.Put(candidates)
 
 			// increment the depth by 1 as we start our decoding pass
@@ -1066,6 +1116,9 @@ ScanLoop:
 // The zero value describes a normal top-level match.
 type detectionState struct {
 	component bool
+	// anchors carries the current text's leading-literal offsets for anchored
+	// rules. nil means every rule scans the whole text.
+	anchors *ruleCandidates
 }
 
 func (d *Detector) detectFragmentWithRuleTimed(ruleTimings *ruletiming.Collector,
@@ -1165,7 +1218,7 @@ func (d *Detector) detectFragmentWithRule(ruleTimings *ruletiming.Collector,
 		return findings
 	}
 
-	matches := r.regex.FindAllStringIndex(currentRaw, -1)
+	matches := d.ruleMatches(r, currentRaw, state.anchors)
 	if len(matches) == 0 {
 		return findings
 	}
@@ -1380,11 +1433,11 @@ func (d *Detector) detectFragmentWithRule(ruleTimings *ruletiming.Collector,
 		return findings
 	}
 
-	return d.processComponents(ruleTimings, fragment, currentRaw, r, encodedSegments, findings, logger)
+	return d.processComponents(ruleTimings, fragment, currentRaw, r, encodedSegments, findings, state.anchors, logger)
 }
 
 // processComponents attaches nearby component matches and enforces required components.
-func (d *Detector) processComponents(ruleTimings *ruletiming.Collector, fragment sources.Fragment, currentRaw string, r *compiledRule, encodedSegments []*codec.EncodedSegment, primaryFindings []report.Finding, logger *slog.Logger) []report.Finding {
+func (d *Detector) processComponents(ruleTimings *ruletiming.Collector, fragment sources.Fragment, currentRaw string, r *compiledRule, encodedSegments []*codec.EncodedSegment, primaryFindings []report.Finding, anchors *ruleCandidates, logger *slog.Logger) []report.Finding {
 	if len(primaryFindings) == 0 {
 		logger.Debug("no primary findings to process for components")
 		return primaryFindings
@@ -1409,7 +1462,7 @@ func (d *Detector) processComponents(ruleTimings *ruletiming.Collector, fragment
 		}
 		rule := &d.rulesBySpecificity[ruleIndex]
 
-		componentFindings := d.detectFragmentWithRuleTimed(ruleTimings, fragment, currentRaw, rule, encodedSegments, nil, detectionState{component: true})
+		componentFindings := d.detectFragmentWithRuleTimed(ruleTimings, fragment, currentRaw, rule, encodedSegments, nil, detectionState{component: true, anchors: anchors})
 		allComponentFindings[component.RuleID] = componentFindings
 
 		logger.Debug("collected component rule findings",

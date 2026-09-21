@@ -11,3 +11,9 @@ type CompiledRegexp interface {
 	SubexpNames() []string
 	String() string
 }
+
+// AnchoredFinder is implemented by engines that can try a match at each of a
+// set of candidate start offsets while keeping the whole input as context.
+type AnchoredFinder interface {
+	FindAllStringIndexAt(s string, starts []int, n int) [][]int
+}

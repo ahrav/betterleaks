@@ -45,6 +45,24 @@ func (r *Regexp) FindAllStringIndex(s string, n int) [][]int {
 	}
 	return nil
 }
+
+// FindAllStringIndexAt is FindAllStringIndex restricted to matches that begin
+// at one of starts (ascending byte offsets). The caller must know that every
+// match of the expression in s begins at a candidate; see regexp/syntax-based
+// prefix analysis in the detector. The second result is false when the active
+// engine cannot anchor at an offset, in which case the caller falls back to
+// FindAllStringIndex.
+func (r *Regexp) FindAllStringIndexAt(s string, starts []int, n int) ([][]int, bool) {
+	e, ok := r.compiled()
+	if !ok {
+		return nil, true
+	}
+	anchored, ok := e.(internal.AnchoredFinder)
+	if !ok {
+		return nil, false
+	}
+	return anchored.FindAllStringIndexAt(s, starts, n), true
+}
 func (r *Regexp) ReplaceAllString(src, repl string) string {
 	if e, ok := r.compiled(); ok {
 		return e.ReplaceAllString(src, repl)

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/h2non/filetype"
 	"github.com/mholt/archives"
 
 	"github.com/betterleaks/betterleaks/v2/logging"
@@ -243,7 +242,7 @@ func (s *File) fileFragments(ctx context.Context, content io.Reader, isArchiveCo
 		// MIME detection is filesystem policy. Reader intentionally scans the
 		// text it is given without trying to classify the underlying resource.
 		if firstFragment {
-			mimetype, matchErr := filetype.Match(chunk.initial)
+			mimetype, matchErr := matchType(chunk.initial)
 			if matchErr != nil {
 				if isArchiveContent {
 					logging.OrDiscard(s.Logger).Warn("could not determine archive content type", "error", matchErr, "path", fullPath)

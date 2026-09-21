@@ -3,6 +3,7 @@ package sources
 import (
 	"context"
 	"errors"
+	"github.com/h2non/filetype"
 	"io"
 	"strings"
 	"testing"
@@ -199,4 +200,28 @@ func TestFile_Fragments_marksFirstFragment(t *testing.T) {
 	require.Equal(t, "bb\n\n", fragments[1].Raw)
 	require.Equal(t, "true", fragments[0].Attr(AttrFSFirstFragment))
 	require.Equal(t, "false", fragments[1].Attr(AttrFSFirstFragment))
+}
+
+func TestMatchTypeAgreesWithFiletype(t *testing.T) {
+	samples := [][]byte{
+		[]byte("plain text\n"),
+		{0x7f, 'E', 'L', 'F', 2, 1, 1, 0},
+		{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'},
+		[]byte("PK\x03\x04rest of a zip"),
+		[]byte("%PDF-1.7\n"),
+		[]byte("{\\rtf1"),
+		{0x1f, 0x8b, 0x08},
+		[]byte("Rar!\x1a\x07\x00"),
+		[]byte("\x00asm\x01\x00\x00\x00"),
+		[]byte("GIF89a"),
+		[]byte("ID3\x03"),
+	}
+	for _, sample := range samples {
+		want, wantErr := filetype.Match(sample)
+		got, gotErr := matchType(sample)
+		require.Equal(t, wantErr, gotErr, "%q", sample)
+		require.Equal(t, want, got, "%q", sample)
+	}
+	_, err := matchType(nil)
+	require.ErrorIs(t, err, filetype.ErrEmptyBuffer)
 }

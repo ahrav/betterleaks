@@ -33,7 +33,7 @@ func TestResolveJobPlan(t *testing.T) {
 	require.Equal(t, wantExplicit, resolveJobPlan(explicitJobs, providerJobProfile))
 
 	require.Equal(t,
-		jobPlan{Source: max(cpus, min(cpus*automaticFileJobsPerCPU, maxAutomaticFileJobs)), Detector: cpus},
+		jobPlan{Source: min(cpus*automaticFileJobsPerCPU, maxAutomaticFileJobs), Detector: cpus},
 		resolveJobPlan(0, directoryJobProfile),
 	)
 	require.Equal(t,

@@ -22,9 +22,12 @@ func AutomaticGit() int {
 	return min(Automatic(), 4)
 }
 
+// AutomaticFiles is the default number of concurrent file readers. Reads
+// from the page cache are cheap and the kernel serializes concurrent opens
+// within a process, so more than 32 readers only add open contention and
+// descriptor-table growth while 32 still hide cold-cache latency.
 func AutomaticFiles() int {
-	processorJobs := Automatic()
-	return max(processorJobs, min(processorJobs*4, 40))
+	return min(Automatic()*4, 32)
 }
 
 func AutomaticObjects() int {

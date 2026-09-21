@@ -33,7 +33,7 @@ func TestProviderTargetJobs(t *testing.T) {
 
 func TestAutomaticSourceJobsUseAdditionalIOFanout(t *testing.T) {
 	processorJobs := Automatic()
-	if got, want := AutomaticFiles(), max(processorJobs, min(processorJobs*4, 40)); got != want {
+	if got, want := AutomaticFiles(), min(processorJobs*4, 32); got != want {
 		t.Fatalf("automaticFileJobs() = %d, want %d", got, want)
 	}
 	if got, want := AutomaticObjects(), processorJobs*2; got != want {

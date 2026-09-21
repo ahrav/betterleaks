@@ -177,7 +177,7 @@ func concatPrefixSet(subs []*syntax.Regexp) (set literalSet, nullable, exact, ok
 	}
 	rest, restNullable, restExact, restOK := concatPrefixSet(subs[1:])
 	if !headNullable {
-		if !restOK || !headExact || len(head.items) == 0 || len(rest.items) == 0 {
+		if !restOK || !headExact || len(head.items) == 0 || len(rest.items) == 0 || !worthExtending(rest.items) {
 			// A non-empty head already begins every match.
 			return head, false, false, true
 		}
@@ -206,6 +206,19 @@ func concatPrefixSet(subs []*syntax.Regexp) (set literalSet, nullable, exact, ok
 		}
 	}
 	return head, restNullable, false, true
+}
+
+// worthExtending reports whether appending rest's literals to a head makes the
+// set more selective. Single-byte continuations (a separator class such as
+// [_\s.-] or a quote) multiply the set without narrowing it, and can push a
+// rule past the anchoring cap; the head alone is the better leading set.
+func worthExtending(rest []string) bool {
+	for _, lit := range rest {
+		if len(lit) < 2 {
+			return false
+		}
+	}
+	return true
 }
 
 func asciiRunes(runes []rune) bool {

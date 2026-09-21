@@ -139,7 +139,14 @@ func (c *findingCollector) Count() int {
 // FileSkipFunc composes the configured source prefilter with a guard for the
 // report file. Files invokes this callback before opening a path, which keeps a
 // scan from consuming the report while the collector is appending to it.
-func (c *findingCollector) FileSkipFunc(configured sources.SkipFunc) sources.SkipFunc {
+//
+// root is the path the Files source walks and followSymlinks its link policy.
+// When the report has a single name (link count 1) and directory symlinks are
+// not followed, every walked path is root joined with a relative suffix, so
+// the report can only appear at one exact path and the guard is a string
+// comparison. Otherwise it falls back to a stat per candidate and
+// os.SameFile, which also catches hard links and aliases through symlinks.
+func (c *findingCollector) FileSkipFunc(configured sources.SkipFunc, root string, followSymlinks bool) sources.SkipFunc {
 	if c.reportPath == "" || c.reportPath == report.StdoutReportPath {
 		return configured
 	}
@@ -150,6 +157,15 @@ func (c *findingCollector) FileSkipFunc(configured sources.SkipFunc) sources.Ski
 	}
 	reportPath = filepath.Clean(reportPath)
 	reportInfo, _ := os.Stat(reportPath)
+
+	if expected, ok := singleReportPath(reportPath, reportInfo, root, followSymlinks); ok {
+		return func(attributes map[string]string) bool {
+			if configured != nil && configured(attributes) {
+				return true
+			}
+			return expected != "" && attributes[sources.AttrPath] == expected
+		}
+	}
 
 	return func(attributes map[string]string) bool {
 		if configured != nil && configured(attributes) {
@@ -174,6 +190,38 @@ func (c *findingCollector) FileSkipFunc(configured sources.SkipFunc) sources.Ski
 		candidateInfo, err := os.Stat(candidate)
 		return err == nil && os.SameFile(reportInfo, candidateInfo)
 	}
+}
+
+// singleReportPath returns the one walked path at which the report file can
+// be reached from root, or "" when it lies outside root. ok is false when the
+// walk could reach the report by another name (hard links, followed symlinks,
+// or an unresolvable root), in which case callers need the stat-based guard.
+func singleReportPath(reportPath string, reportInfo os.FileInfo, root string, followSymlinks bool) (expected string, ok bool) {
+	if followSymlinks || reportInfo == nil || !reportInfo.Mode().IsRegular() || !singleLink(reportInfo) {
+		return "", false
+	}
+	canonicalReport, err := filepath.EvalSymlinks(reportPath)
+	if err != nil {
+		return "", false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", false
+	}
+	if canonicalReport == canonicalRoot {
+		return root, true
+	}
+	rel, found := strings.CutPrefix(canonicalReport, canonicalRoot+string(filepath.Separator))
+	if !found {
+		// Outside the walked tree; without hard links it is unreachable.
+		return "", true
+	}
+	// The walker reports root exactly as given and joins descendants onto it.
+	return filepath.Join(root, rel), true
 }
 
 func (c *findingCollector) Close() error {

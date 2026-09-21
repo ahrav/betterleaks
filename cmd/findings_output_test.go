@@ -179,7 +179,7 @@ func TestFindingCollectorSkipsReportBeforeFilesOpenIt(t *testing.T) {
 	files := &sources.Files{
 		Path:       directory,
 		Jobs:       1,
-		ShouldSkip: collector.FileSkipFunc(configuredSkip),
+		ShouldSkip: collector.FileSkipFunc(configuredSkip, directory, false),
 	}
 	var visited []string
 	err = files.Fragments(t.Context(), func(fragment sources.Fragment, err error) error {
@@ -281,4 +281,69 @@ func captureFindingStdout(t *testing.T, fn func()) string {
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
 	return string(contents)
+}
+
+func TestFindingCollectorSkipsHardLinkedReport(t *testing.T) {
+	directory := t.TempDir()
+	reportPath := filepath.Join(directory, "findings.json")
+	aliasPath := filepath.Join(directory, "alias.txt")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "input.txt"), []byte("input"), 0o600))
+
+	flags, output := newFindingOutputCommand(false, reportPath, true, 0)
+	collector, err := newFindingCollector(flags, true, output)
+	require.NoError(t, err)
+	if err := os.Link(reportPath, aliasPath); err != nil {
+		t.Skip("hard links unsupported:", err)
+	}
+	require.NoError(t, collector.Add(testOutputFinding("first")))
+
+	files := &sources.Files{
+		Path:       directory,
+		Jobs:       1,
+		ShouldSkip: collector.FileSkipFunc(nil, directory, false),
+	}
+	var visited []string
+	require.NoError(t, files.Fragments(t.Context(), func(fragment sources.Fragment, err error) error {
+		if err != nil {
+			return err
+		}
+		visited = append(visited, filepath.Clean(filepath.FromSlash(fragment.Attr(sources.AttrPath))))
+		return nil
+	}))
+	require.NoError(t, collector.Close())
+	require.ElementsMatch(t, []string{filepath.Join(directory, "input.txt")}, visited)
+}
+
+func TestSingleReportPath(t *testing.T) {
+	directory := t.TempDir()
+	root := filepath.Join(directory, "root")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
+	inside := filepath.Join(root, "sub", "findings.json")
+	outside := filepath.Join(directory, "findings.json")
+	require.NoError(t, os.WriteFile(inside, []byte("[]"), 0o600))
+	require.NoError(t, os.WriteFile(outside, []byte("[]"), 0o600))
+	insideInfo, err := os.Stat(inside)
+	require.NoError(t, err)
+	outsideInfo, err := os.Stat(outside)
+	require.NoError(t, err)
+
+	expected, ok := singleReportPath(inside, insideInfo, root, false)
+	require.True(t, ok)
+	require.Equal(t, inside, expected)
+
+	// The walker joins descendants onto the root exactly as it was given.
+	t.Chdir(directory)
+	expected, ok = singleReportPath(inside, insideInfo, "root", false)
+	require.True(t, ok)
+	require.Equal(t, filepath.Join("root", "sub", "findings.json"), expected)
+
+	expected, ok = singleReportPath(outside, outsideInfo, root, false)
+	require.True(t, ok)
+	require.Equal(t, "", expected)
+
+	_, ok = singleReportPath(inside, insideInfo, root, true)
+	require.False(t, ok, "followed symlinks can alias the report")
+
+	_, ok = singleReportPath(inside, nil, root, false)
+	require.False(t, ok, "an unknown report needs the stat guard")
 }

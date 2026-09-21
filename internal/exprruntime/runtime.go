@@ -35,6 +35,18 @@ type compiledProgram struct {
 	tokenCounter         *tokenizer.Counter
 	tokenCounterProvider func() *tokenizer.Counter
 	bindings             bindings
+
+	// envPool recycles evaluation environments for filter and prefilter
+	// programs, which run once per path and per candidate finding. Each
+	// environment is a clone of bindings with its own runtimeBindings; the VM
+	// does not retain the environment after Run.
+	envPool sync.Pool
+}
+
+// evalEnv is one pooled evaluation environment.
+type evalEnv struct {
+	b  bindings
+	rt *runtimeBindings
 }
 
 var emptyStringMap = map[string]string{}
@@ -281,7 +293,9 @@ func (e *Runtime) compileBindings(mode compileMode, counter *tokenizer.Counter) 
 // Compile and runtime bindings expose the same names. Dynamic values are layered
 // onto a shallow copy so compiled programs can share static function bindings.
 func (e *Runtime) EvalFilter(prg Program, finding map[string]any, attributes map[string]string) (bool, error) {
-	b := prg.evalBindings()
+	env := prg.acquireEnv()
+	defer prg.releaseEnv(env)
+	b := env.b
 	if finding == nil {
 		finding = emptyFilterFinding
 	}
@@ -290,17 +304,38 @@ func (e *Runtime) EvalFilter(prg Program, finding map[string]any, attributes map
 	}
 	b["finding"] = finding
 	b["attributes"] = attributes
-	if rt, ok := b["__runtime"].(*runtimeBindings); ok {
-		rt.attrs = attributes
-		b["setConfidence"] = rt.setConfidence
+	if env.rt != nil {
+		env.rt.attrs = attributes
 	}
 	return runBool(prg, b, "filter")
 }
 
 func (e *Runtime) EvalPrefilter(prg Program, attributes map[string]string) (bool, error) {
+	env := prg.acquireEnv()
+	defer prg.releaseEnv(env)
+	env.b["attributes"] = nonNilStringMap(attributes)
+	return runBool(prg, env.b, "prefilter")
+}
+
+// acquireEnv returns an evaluation environment: the program's static bindings
+// plus per-evaluation runtime state. Dynamic keys are overwritten by every
+// caller before Run, so a recycled environment carries nothing over except
+// its runtimeBindings, whose attrs the caller also resets.
+func (prg Program) acquireEnv() *evalEnv {
+	if env, ok := prg.envPool.Get().(*evalEnv); ok {
+		return env
+	}
 	b := prg.evalBindings()
-	b["attributes"] = nonNilStringMap(attributes)
-	return runBool(prg, b, "prefilter")
+	rt, _ := b["__runtime"].(*runtimeBindings)
+	return &evalEnv{b: b, rt: rt}
+}
+
+func (prg Program) releaseEnv(env *evalEnv) {
+	if env.rt != nil {
+		env.rt.attrs = nil
+		env.rt.finding = nil
+	}
+	prg.envPool.Put(env)
 }
 
 func (prg Program) evalBindings() bindings {
@@ -314,6 +349,11 @@ func (prg Program) evalBindings() bindings {
 			b["__runtime"] = rt
 			b["failsTokenEfficiency"] = rt.failsTokenEfficiency
 			b["tokenRatio"] = rt.tokenRatio
+			if _, ok := b["setConfidence"]; ok {
+				// Filter programs expose setConfidence; bind it to this
+				// environment's runtime so it writes the caller's attributes.
+				b["setConfidence"] = rt.setConfidence
+			}
 		}
 		return b
 	}

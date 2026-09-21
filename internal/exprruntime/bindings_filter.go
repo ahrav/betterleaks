@@ -3,9 +3,12 @@ package exprruntime
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unsafe"
 
 	"github.com/betterleaks/betterleaks/v2/internal/confidence"
 	"github.com/betterleaks/betterleaks/v2/internal/tokenizer"
@@ -17,7 +20,59 @@ import (
 var (
 	regexCache  sync.Map // string -> *blregexp.Regexp
 	acTrieCache sync.Map // string -> *ahocorasick.Matcher
+
+	// listRegexCache remembers the compiled regex for a pattern list by the
+	// identity of the []any the Expr VM hands to matchesAny. Expr folds a
+	// constant list literal into one slice that every evaluation reuses, so
+	// this skips converting and joining ~30 patterns into a 2 KB cache key on
+	// every path and finding. Entries verify their patterns before use, so a
+	// recycled address with different contents cannot return a stale regex.
+	listRegexCache sync.Map // unsafe.Pointer(first element) -> *listRegexEntry
+	listRegexCount atomic.Int32
 )
+
+// maxListRegexEntries bounds the identity cache; dynamic lists built per
+// evaluation would otherwise grow it without limit.
+const maxListRegexEntries = 1024
+
+type listRegexEntry struct {
+	patterns []any
+	re       *blregexp.Regexp
+	err      error
+}
+
+func (e *listRegexEntry) matches(list []any) bool {
+	if len(e.patterns) != len(list) {
+		return false
+	}
+	for i, p := range e.patterns {
+		if p != list[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// joinedRegexForList resolves the alternation regex for an Expr pattern list.
+func joinedRegexForList(patterns any) (*blregexp.Regexp, error) {
+	list, ok := patterns.([]any)
+	if !ok || len(list) == 0 {
+		return getOrCompileJoinedRegex(toStringSlice(patterns))
+	}
+	key := unsafe.Pointer(unsafe.SliceData(list))
+	if v, ok := listRegexCache.Load(key); ok {
+		if e := v.(*listRegexEntry); e.matches(list) {
+			return e.re, e.err
+		}
+	}
+	re, err := getOrCompileJoinedRegex(toStringSlice(list))
+	if listRegexCount.Add(1) <= maxListRegexEntries {
+		listRegexCache.Store(key, &listRegexEntry{patterns: slices.Clone(list), re: re, err: err})
+	} else {
+		listRegexCount.Add(-1)
+	}
+	return re, err
+}
 
 func (rt *runtimeBindings) setConfidence(value string) (string, error) {
 	if !confidence.Valid(value) {
@@ -79,7 +134,7 @@ func getOrBuildTrie(terms []string) *ahocorasick.Matcher {
 }
 
 func matchesAny(values, patterns any) (bool, error) {
-	re, err := getOrCompileJoinedRegex(toStringSlice(patterns))
+	re, err := joinedRegexForList(patterns)
 	if err != nil || re == nil {
 		return false, err
 	}

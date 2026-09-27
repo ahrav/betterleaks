@@ -5,6 +5,8 @@ package ahocorasick
 
 import (
 	"math/bits"
+	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -39,6 +41,13 @@ type node struct {
 	fail uint32
 	out  []uint32
 }
+
+// outputFlag marks a transition entry whose target state completes at least
+// one pattern; stateMask recovers the row offset.
+const (
+	outputFlag uint32 = 1 << 31
+	stateMask         = ^outputFlag
+)
 
 // Compile builds a matcher. When foldASCII is true, ASCII case is ignored.
 func Compile(patterns []string, foldASCII bool) *Matcher {
@@ -112,6 +121,13 @@ func Compile(patterns []string, foldASCII bool) *Matcher {
 	for i := range nodes {
 		outputs[i] = nodes[i].out
 	}
+	// Entries leading to a state with outputs carry outputFlag, so the hot loop
+	// consults outputs only there.
+	for i, entry := range transitions {
+		if len(outputs[entry>>shift]) > 0 {
+			transitions[i] = entry | outputFlag
+		}
+	}
 	m := &Matcher{transitions: transitions, shift: shift, outputs: outputs, lengths: lengths, maxLength: maxLength, foldASCII: foldASCII}
 	for b := range m.classes {
 		m.classes[b] = classes[fold(byte(b), foldASCII)]
@@ -119,12 +135,24 @@ func Compile(patterns []string, foldASCII bool) *Matcher {
 	return m
 }
 
-// Visit calls fn for every match. Returning false stops traversal.
+// Visit calls fn for every match in ascending end order. Returning false stops
+// traversal.
 func (m *Matcher) Visit(text string, fn func(patternID, start, end int) bool) {
+	if len(text) < twoChainMinBytes || (m.foldASCII && hasASCIIFoldRunes(text)) {
+		m.visitOne(text, fn)
+		return
+	}
+	m.visitTwo(text, fn)
+}
+
+// visitOne walks the automaton over text with one dependent load chain.
+func (m *Matcher) visitOne(text string, fn func(patternID, start, end int) bool) {
+	// Local copies let the loop reuse field values across calls to fn.
+	transitions, classes, shift, fold := m.transitions, &m.classes, m.shift, m.foldASCII
 	state := uint32(0)
 	for i := 0; i < len(text); i++ {
 		b := text[i]
-		if m.foldASCII && b >= utf8.RuneSelf {
+		if fold && b >= utf8.RuneSelf {
 			// Long s and Kelvin sign are the only non-ASCII runes that fold
 			// to ASCII. Everything else breaks an ASCII keyword, including
 			// malformed UTF-8. No Unicode table lookup is needed here.
@@ -136,11 +164,98 @@ func (m *Matcher) Visit(text string, fn func(patternID, start, end int) bool) {
 			state = 0
 			continue
 		}
-		state = m.transitions[int(state)+int(m.classes[b])]
-		for _, id := range m.outputs[state>>m.shift] {
+		entry := transitions[int(state)+int(classes[b])]
+		state = entry & stateMask
+		if entry&outputFlag == 0 {
+			continue
+		}
+		for _, id := range m.outputs[state>>shift] {
 			if !fn(int(id), i+1-m.lengths[id], i+1) {
 				return
 			}
+		}
+	}
+}
+
+// twoChainMinBytes is the text length from which two interleaved chains pay
+// for the buffered second half.
+const twoChainMinBytes = 4096
+
+// hasASCIIFoldRunes reports whether text contains U+017F or U+212A, the runes
+// visitUnicode handles.
+func hasASCIIFoldRunes(text string) bool {
+	return strings.Contains(text, "\u017f") || strings.Contains(text, "\u212a")
+}
+
+// pendingMatch is a second-half match held back until the first half has
+// reported everything before it.
+type pendingMatch struct {
+	id  uint32
+	end int32
+}
+
+var pendingPool = sync.Pool{New: func() any {
+	buf := make([]pendingMatch, 0, 1024)
+	return &buf
+}}
+
+// visitTwo walks two halves of text at once. Each automaton step depends on
+// the previous state's table entry, so one chain runs at cache latency per
+// byte; two independent chains keep two loads in flight. The second chain
+// starts maxLength bytes before the midpoint, which is enough context to reach
+// the state the first chain would have at the midpoint, and reports only
+// matches ending past it. Its matches are buffered so fn still sees ascending
+// end offsets.
+func (m *Matcher) visitTwo(text string, fn func(patternID, start, end int) bool) {
+	transitions, classes, shift, fold := m.transitions, &m.classes, m.shift, m.foldASCII
+	mid := len(text) / 2
+	pending := pendingPool.Get().(*[]pendingMatch)
+	defer func() {
+		*pending = (*pending)[:0]
+		pendingPool.Put(pending)
+	}()
+
+	stateA, stateB := uint32(0), uint32(0)
+	i, j := 0, max(0, mid-m.maxLength)
+	step := func(state uint32, b byte) (uint32, bool) {
+		if fold && b >= utf8.RuneSelf {
+			return 0, false
+		}
+		entry := transitions[int(state)+int(classes[b])]
+		return entry & stateMask, entry&outputFlag != 0
+	}
+	for i < mid {
+		var outA, outB bool
+		stateA, outA = step(stateA, text[i])
+		stateB, outB = step(stateB, text[j])
+		i++
+		j++
+		if outA {
+			for _, id := range m.outputs[stateA>>shift] {
+				if !fn(int(id), i-m.lengths[id], i) {
+					return
+				}
+			}
+		}
+		if outB && j > mid {
+			for _, id := range m.outputs[stateB>>shift] {
+				*pending = append(*pending, pendingMatch{id: id, end: int32(j)})
+			}
+		}
+	}
+	for ; j < len(text); j++ {
+		var outB bool
+		stateB, outB = step(stateB, text[j])
+		if outB {
+			for _, id := range m.outputs[stateB>>shift] {
+				*pending = append(*pending, pendingMatch{id: id, end: int32(j + 1)})
+			}
+		}
+	}
+	for _, p := range *pending {
+		end := int(p.end)
+		if !fn(int(p.id), end-m.lengths[p.id], end) {
+			return
 		}
 	}
 }
@@ -179,7 +294,7 @@ func (m *Matcher) visitUnicode(text string, offset int, state uint32, fn func(pa
 		// to ASCII occupies multiple source bytes. Keep the source start of the
 		// last maxLength matcher bytes so callbacks still receive byte offsets.
 		starts[position%len(starts)] = i
-		state = m.transitions[int(state)+int(m.classes[b])]
+		state = m.transitions[int(state)+int(m.classes[b])] & stateMask
 		for _, id := range m.outputs[state>>m.shift] {
 			end := i + size
 			start := end

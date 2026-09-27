@@ -41,6 +41,17 @@ type Files struct {
 
 // walkFiles serializes callbacks while fastwalk inspects paths concurrently.
 func (s *Files) walkFiles(ctx context.Context, yield func(filePath) error) error {
+	var yieldMu sync.Mutex
+	return s.walkFilesConcurrent(ctx, func(name filePath) error {
+		yieldMu.Lock()
+		defer yieldMu.Unlock()
+		return yield(name)
+	})
+}
+
+// walkFilesConcurrent calls yield from fastwalk's worker goroutines as paths
+// are found; yield must be safe for concurrent use.
+func (s *Files) walkFilesConcurrent(ctx context.Context, yield func(filePath) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -49,7 +60,6 @@ func (s *Files) walkFiles(ctx context.Context, yield func(filePath) error) error
 		return err
 	}
 	logger := logging.OrDiscard(s.Logger)
-	var yieldMu sync.Mutex
 	visit := func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -119,8 +129,6 @@ func (s *Files) walkFiles(ctx context.Context, yield func(filePath) error) error
 			}
 		}
 
-		yieldMu.Lock()
-		defer yieldMu.Unlock()
 		if err := yield(name); err != nil {
 			return &walkCallbackError{err: err}
 		}
@@ -173,7 +181,8 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 			return nil
 		})
 	}
-	producerErr := s.walkFiles(groupCtx, func(name filePath) error {
+	// The channel send is safe from every walker goroutine.
+	producerErr := s.walkFilesConcurrent(groupCtx, func(name filePath) error {
 		select {
 		case paths <- name:
 			return nil

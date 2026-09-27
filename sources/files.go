@@ -186,15 +186,13 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 }
 
 func (s *Files) readFile(ctx context.Context, name filePath, yield FragmentsFunc) error {
-	f, err := os.Open(name.path)
+	f, err := openFile(name.path)
 	if err != nil {
 		if os.IsPermission(err) {
 			logging.OrDiscard(s.Logger).Warn("skipping file: permission denied", "path", name.path)
 		}
 		return nil
 	}
-
-	defer f.Close()
 
 	file := File{
 		Logger:          s.Logger,
@@ -206,5 +204,7 @@ func (s *Files) readFile(ctx context.Context, name filePath, yield FragmentsFunc
 		prefiltered:     true,
 	}
 
-	return file.Fragments(ctx, yield)
+	err = file.Fragments(ctx, yield)
+	_ = f.Close()
+	return err
 }

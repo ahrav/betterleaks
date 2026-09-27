@@ -156,6 +156,19 @@ func CompileWithEngine(str string, engine Engine) (*Regexp, error) {
 	}, nil
 }
 
+// CompileParsedWithEngine is CompileWithEngine for a pattern the caller has
+// already parsed with syntax.Perl flags; parsed must be the parse of str.
+func CompileParsedWithEngine(str string, parsed *syntax.Regexp, engine Engine) *Regexp {
+	if engine == nil {
+		engine = Stdlib{}
+	}
+	return &Regexp{
+		pattern:   str,
+		engine:    engine,
+		numSubexp: parsed.MaxCap(),
+	}
+}
+
 // MustCompile is like Compile but panics on invalid syntax.
 func MustCompile(str string) *Regexp {
 	r, err := Compile(str)

@@ -33,6 +33,12 @@ func leadingLiterals(pattern string) (literals []string, fold bool, ok bool) {
 	if err != nil {
 		return nil, false, false
 	}
+	return leadingLiteralsOf(re)
+}
+
+// leadingLiteralsOf is leadingLiterals for a parsed expression; re is read,
+// never modified.
+func leadingLiteralsOf(re *syntax.Regexp) (literals []string, fold bool, ok bool) {
 	set, nullable, _, ok := prefixSet(re.Simplify())
 	if !ok || nullable || len(set.items) == 0 {
 		return nil, false, false

@@ -38,6 +38,25 @@ func Compile(pattern string, keywords []string) *Plan {
 	if err != nil {
 		return nil
 	}
+	return CompileParsed(re, keywords)
+}
+
+// CompileParsed is Compile for an expression the caller has already parsed
+// with syntax.Perl flags; re is read, never modified.
+func CompileParsed(re *syntax.Regexp, keywords []string) *Plan {
+	if len(keywords) == 0 {
+		return nil
+	}
+	for _, keyword := range keywords {
+		if keyword == "" {
+			return nil
+		}
+		for _, r := range keyword {
+			if r >= utf8.RuneSelf {
+				return nil
+			}
+		}
+	}
 	plan := analyze(re, keywords)
 	if plan != nil {
 		required := mandatoryPunctuation(re)

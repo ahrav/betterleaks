@@ -398,6 +398,14 @@ func (s *Scanner) run(ctx context.Context, source sources.Source, yield func(sca
 	go func() {
 		defer close(resultsCh)
 
+		// Detection runs on the source's goroutines when they number at least
+		// the detection slots; then only fragments with findings or errors are
+		// handed to the consumer.
+		inline := false
+		if concurrent, ok := source.(sources.ConcurrentSource); ok {
+			inline = concurrent.YieldConcurrency() >= s.workers
+		}
+
 		var workers sync.WaitGroup
 		sourceErr := source.Fragments(runCtx, func(fragment sources.Fragment, fragmentErr error) error {
 			if fragmentErr != nil {
@@ -407,6 +415,23 @@ func (s *Scanner) run(ctx context.Context, source sources.Source, yield func(sca
 				return emitError(fragmentErr)
 			}
 			if len(fragment.Raw) == 0 && fragment.Attr(sources.AttrPath) == "" {
+				return nil
+			}
+			if inline {
+				if err := s.workerSlots.Acquire(runCtx, 1); err != nil {
+					return err
+				}
+				findings, err := s.detectFragmentWithState(runCtx, fragment, &state)
+				s.workerSlots.Release(1)
+				if len(findings) == 0 && err == nil {
+					return nil
+				}
+				// The slot is released before publishing, so a handler that
+				// starts another scan on this Scanner can still acquire one.
+				if reserveErr := reserveResult(); reserveErr != nil {
+					return reserveErr
+				}
+				resultsCh <- fragmentResult{findings: findings, err: err, fatal: err != nil}
 				return nil
 			}
 			if err := reserveResult(); err != nil {

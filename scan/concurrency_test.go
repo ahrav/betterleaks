@@ -185,3 +185,99 @@ func (s *countedFragmentSource) Fragments(_ context.Context, yield sources.Fragm
 	}
 	return nil
 }
+
+// concurrentFragmentSource yields from several goroutines at once, as a
+// filesystem source does, and reports that concurrency.
+type concurrentFragmentSource struct {
+	goroutines int
+	perWorker  int
+	yielding   atomic.Int32
+	peak       atomic.Int32
+}
+
+func (s *concurrentFragmentSource) YieldConcurrency() int { return s.goroutines }
+
+func (s *concurrentFragmentSource) Fragments(_ context.Context, yield sources.FragmentsFunc) error {
+	var wg sync.WaitGroup
+	errs := make(chan error, s.goroutines)
+	for range s.goroutines {
+		wg.Go(func() {
+			for i := range s.perWorker {
+				raw := "nothing here"
+				if i%2 == 0 {
+					raw = "secret-alpha secret-beta secret-gamma"
+				}
+				active := s.yielding.Add(1)
+				for peak := s.peak.Load(); active > peak; peak = s.peak.Load() {
+					if s.peak.CompareAndSwap(peak, active) {
+						break
+					}
+				}
+				err := yield(sources.Fragment{Raw: raw}, nil)
+				s.yielding.Add(-1)
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	return <-errs
+}
+
+func TestConcurrentSourceDetectsOnItsOwnGoroutines(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resume := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(resume) })
+		defer unblock()
+		gate := &detectionGate{resume: resume}
+		cfg := testConfig()
+		cfg.Rules[0].FilterExpr = "true"
+		scanner := mustNew(t, cfg, WithWorkers(3), WithLogger(slog.New(gate)))
+		source := &concurrentFragmentSource{goroutines: 8, perWorker: 10}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := scanner.Scan(t.Context(), source, nil)
+			done <- err
+		}()
+		synctest.Wait()
+
+		// Detection slots bound the work even though the source runs eight
+		// goroutines, and the blocked detections hold their yield callers.
+		require.EqualValues(t, 3, gate.active.Load())
+		require.EqualValues(t, 8, source.yielding.Load())
+		unblock()
+		require.NoError(t, <-done)
+		require.EqualValues(t, 3, gate.peak.Load())
+		// Every secret in every fragment reached the filter.
+		require.EqualValues(t, 8*5*3, gate.calls.Load())
+	})
+}
+
+func TestConcurrentSourceBelowWorkersUsesDetectionGoroutines(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resume := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(resume) })
+		defer unblock()
+		gate := &detectionGate{resume: resume}
+		cfg := testConfig()
+		cfg.Rules[0].FilterExpr = "true"
+		scanner := mustNew(t, cfg, WithWorkers(6), WithLogger(slog.New(gate)))
+		source := &concurrentFragmentSource{goroutines: 2, perWorker: 10}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := scanner.Scan(t.Context(), source, nil)
+			done <- err
+		}()
+		synctest.Wait()
+
+		// Two yielding goroutines feed up to six detection workers.
+		require.EqualValues(t, 6, gate.active.Load())
+		unblock()
+		require.NoError(t, <-done)
+	})
+}

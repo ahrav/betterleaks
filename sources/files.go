@@ -158,7 +158,7 @@ func (s *Files) walkFiles(ctx context.Context, yield func(filePath) error) error
 func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	g, groupCtx := errgroup.WithContext(ctx)
 	// Extra readers retain buffers and decompressor workspaces while detection catches up.
-	workers := max(runtime.GOMAXPROCS(0), 1)
+	workers := s.YieldConcurrency()
 	paths := make(chan filePath, workers)
 	for range workers {
 		g.Go(func() error {
@@ -183,6 +183,11 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 	})
 	close(paths)
 	return errors.Join(producerErr, g.Wait())
+}
+
+// YieldConcurrency returns the number of reader goroutines Fragments runs.
+func (s *Files) YieldConcurrency() int {
+	return max(runtime.GOMAXPROCS(0), 1)
 }
 
 func (s *Files) readFile(ctx context.Context, name filePath, yield FragmentsFunc) error {

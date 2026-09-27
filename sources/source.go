@@ -30,3 +30,12 @@ type Source interface {
 	// read-ahead, including API pagination. Sources choose their own concurrency.
 	Fragments(ctx context.Context, yield FragmentsFunc) error
 }
+
+// ConcurrentSource is a Source that calls yield from a known number of
+// goroutines at once. A consumer can process fragments on those goroutines.
+type ConcurrentSource interface {
+	Source
+	// YieldConcurrency returns the number of goroutines that call yield
+	// concurrently.
+	YieldConcurrency() int
+}

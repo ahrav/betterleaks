@@ -51,6 +51,58 @@ func (r *Regexp) FindAllStringSubmatchIndex(s string, n int) [][]int {
 	}
 	return nil
 }
+
+// AnchoredFinder is implemented by compiled regexes that can restrict a search
+// to matches beginning at given offsets while keeping the whole text as
+// context for ^, $ and \b.
+type AnchoredFinder interface {
+	FindAllStringIndexAt(s string, starts []int, n int) [][]int
+	FindAllStringSubmatchIndexAt(s string, starts []int, n int) [][]int
+}
+
+// FindAllStringIndexAt is FindAllStringIndex restricted to matches that begin
+// at one of starts (ascending byte offsets). The caller must know that every
+// match of the expression in s begins at a candidate; see the leading-literal
+// analysis in the scanner. The second result is false when the engine cannot
+// anchor at an offset, in which case the caller uses FindAllStringIndex.
+func (r *Regexp) FindAllStringIndexAt(s string, starts []int, n int) ([][]int, bool) {
+	e, ok := r.compiled()
+	if !ok {
+		return nil, true
+	}
+	anchored, ok := e.(AnchoredFinder)
+	if !ok {
+		return nil, false
+	}
+	return anchored.FindAllStringIndexAt(s, starts, n), true
+}
+
+// FindAllStringSubmatchIndexAt is FindAllStringSubmatchIndex under the same
+// contract as FindAllStringIndexAt.
+func (r *Regexp) FindAllStringSubmatchIndexAt(s string, starts []int, n int) ([][]int, bool) {
+	e, ok := r.compiled()
+	if !ok {
+		return nil, true
+	}
+	anchored, ok := e.(AnchoredFinder)
+	if !ok {
+		return nil, false
+	}
+	return anchored.FindAllStringSubmatchIndexAt(s, starts, n), true
+}
+
+// AnchoredEngine is implemented by engines whose compiled regexes implement
+// AnchoredFinder. AnchoredSearch preserves lazy regex compilation.
+type AnchoredEngine interface {
+	AnchoredSearch() bool
+}
+
+// SupportsAnchoredSearch reports whether regexes compiled by engine implement
+// AnchoredFinder.
+func SupportsAnchoredSearch(engine Engine) bool {
+	anchored, ok := engine.(AnchoredEngine)
+	return ok && anchored.AnchoredSearch()
+}
 func (r *Regexp) ReplaceAllString(src, repl string) string {
 	if e, ok := r.compiled(); ok {
 		return e.ReplaceAllString(src, repl)

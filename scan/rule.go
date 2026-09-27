@@ -17,6 +17,7 @@ type compiledRule struct {
 	guard         *assignmentGuard
 	span          *regexspan.Plan
 	searchAnchors []string
+	leads         []string
 	rule          config.Rule
 	regex         *regexp.Regexp
 	path          *regexp.Regexp

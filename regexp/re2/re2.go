@@ -16,3 +16,8 @@ func (RE2) Compile(str string) (regexp.CompiledRegexp, error) {
 func (RE2) Version() string {
 	return "re2"
 }
+
+// AnchoredSearch reports that compiled regexes implement regexp.AnchoredFinder.
+func (RE2) AnchoredSearch() bool {
+	return true
+}

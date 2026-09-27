@@ -60,7 +60,7 @@ func runDirectory(runtime *commandRuntime, globals *GlobalFlags, options *Direct
 
 		s := &sources.Files{
 			Logger:          runtime.Logger(),
-			Prefilter:       findings.FileSkipFunc(filters.shouldSkip),
+			Prefilter:       findings.FileSkipFunc(filters.shouldSkip, source, options.FollowSymlinks),
 			FollowSymlinks:  options.FollowSymlinks,
 			MaxFileSize:     options.MaxTargetMegabytes * 1_000_000,
 			Path:            source,

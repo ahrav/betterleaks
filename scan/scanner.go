@@ -598,8 +598,15 @@ ScanLoop:
 					}
 				}
 				// Keyword matches decide eligibility; leading literals supply the
-				// offsets an anchored rule's regex is tried at.
+				// offsets an anchored rule's regex is tried at. A guarded rule's
+				// leading literals are its keywords, so the guard also prunes the
+				// offsets: a match requires the inferred assignment shape after
+				// the leading literal.
 				for _, ruleIndex := range s.leadRuleIndexes[patternID] {
+					rule := &s.rulesBySpecificity[ruleIndex]
+					if rule.guard != nil && !rule.guard.possible(currentRaw, end) {
+						continue
+					}
 					candidates.starts[ruleIndex] = append(candidates.starts[ruleIndex], start)
 				}
 				return true

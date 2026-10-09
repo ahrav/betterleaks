@@ -5,6 +5,7 @@ go 1.25.0
 toolchain go1.25.12
 
 require (
+	github.com/ahrav/go-gitpack v0.0.0-20261009193749-3811d26faaad
 	github.com/alecthomas/kong v1.16.1
 	github.com/charlievieth/fastwalk v1.0.14
 	github.com/dlclark/regexp2 v1.11.5
@@ -28,10 +29,12 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.2 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
+	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
+	github.com/hashicorp/golang-lru/arc/v2 v2.0.7 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.19.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mikelolasagasti/xz v1.0.1 // indirect
@@ -46,7 +49,7 @@ require (
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/wasilibs/wazero-helpers v0.0.0-20250123031827-cd30c44769bb // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
-	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
+	golang.org/x/exp v0.0.0-20250606033433-dcc06ee1d476 // indirect
 )
 
 require (

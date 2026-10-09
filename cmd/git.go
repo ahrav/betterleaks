@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/betterleaks/betterleaks/v2/detect"
@@ -20,13 +22,15 @@ func (e *multipleErrors) Error() string   { return e.msg }
 func (e *multipleErrors) Unwrap() []error { return e.errs }
 
 type GitCmd struct {
-	ScanFlags `embed:""`
-	Platform  string   `help:"Target platform used to generate links: github or gitlab."`
-	Staged    bool     `help:"Scan staged commits (for pre-commit)."`
-	PreCommit bool     `name:"pre-commit" help:"Scan using git diff."`
-	LogOpts   string   `name:"log-opts" help:"Git log options."`
-	Include   []string `help:"Additional Git resources to scan: commit-messages, tag-messages, reflogs."`
-	Repo      string   `arg:"" optional:"" help:"Repository to scan."`
+	ScanFlags  `embed:""`
+	Platform   string   `help:"Target platform used to generate links: github or gitlab."`
+	Staged     bool     `help:"Scan staged commits (for pre-commit)."`
+	PreCommit  bool     `name:"pre-commit" help:"Scan using git diff."`
+	LogOpts    string   `name:"log-opts" help:"Git log options."`
+	Include    []string `help:"Additional Git resources to scan: commit-messages, tag-messages, reflogs."`
+	Engine     string   `name:"git-engine" default:"auto" enum:"auto,git,gitpack" help:"History reader: auto reads pack files in process for plain history scans and runs git otherwise; git always runs git; gitpack always reads in process."`
+	DedupLines bool     `name:"git-dedup-lines" default:"true" negatable:"" help:"With the in-process engine, report each added line at its first introduction in history only."`
+	Repo       string   `arg:"" optional:"" help:"Repository to scan."`
 }
 
 func (cmd GitCmd) Validate() error {
@@ -36,12 +40,30 @@ func (cmd GitCmd) Validate() error {
 	if len(cmd.Include) > 0 && (cmd.Staged || cmd.PreCommit) {
 		return errors.New("--include requires a Git history scan; it cannot be combined with --staged or --pre-commit")
 	}
-	return (&sources.Git{Include: cmd.Include}).Validate()
+	return (&sources.Git{Include: cmd.Include, Engine: cmd.Engine}).Validate()
 }
 
 func (cmd *GitCmd) Run(cli *CLI, runtime *commandRuntime) error {
 	runGit(runtime, &cli.GlobalFlags, cmd)
 	return nil
+}
+
+// inProcessHistoryGCPercent is the collector headroom while the in-process
+// history engine runs. The engine keeps a large live heap (object cache, pack
+// indexes, commit graph, hunks in flight), so the process-wide default of
+// defaultGCPercent multiplies that into several gigabytes of resident memory
+// for a mid-sized repository; at 100 the scan's wall time is unchanged on 8
+// and 64 cores and peak RSS halves. GOGC in the environment still wins.
+const inProcessHistoryGCPercent = 100
+
+// tuneGCForInProcessHistory applies inProcessHistoryGCPercent and returns the
+// function that restores the previous setting.
+func tuneGCForInProcessHistory() func() {
+	if os.Getenv("GOGC") != "" {
+		return func() {}
+	}
+	prev := debug.SetGCPercent(inProcessHistoryGCPercent)
+	return func() { debug.SetGCPercent(prev) }
 }
 
 func runGit(runtime *commandRuntime, globals *GlobalFlags, options *GitCmd) {
@@ -64,7 +86,11 @@ func runGit(runtime *commandRuntime, globals *GlobalFlags, options *GitCmd) {
 	cfg := Config(runtime)
 
 	// create detector
-	jobs := resolveJobPlan(options.Jobs, gitJobProfile)
+	profile := gitJobProfile
+	if !options.PreCommit && !options.Staged && (&sources.Git{RepoPath: source, LogOpts: options.LogOpts, Include: options.Include, Engine: options.Engine}).InProcess() {
+		profile = inProcessGitJobProfile
+	}
+	jobs := resolveJobPlan(options.Jobs, profile)
 	detector := Detector(runtime, globals, &options.ScanFlags, cfg, source, detect.WithJobs(jobs.Detector))
 
 	findings := mustNewFindingCollector(runtime, &options.ScanFlags, globals.NoColor)
@@ -95,7 +121,7 @@ func runGit(runtime *commandRuntime, globals *GlobalFlags, options *GitCmd) {
 		}
 		resolvedPlatform, remoteURL := sources.ResolveRemote(runtime.Context, scmPlatform, source)
 
-		src = &sources.Git{
+		gitSrc := &sources.Git{
 			Logger:          runtime.Logger(),
 			RepoPath:        source,
 			ShouldSkip:      detector.SkipFunc(),
@@ -105,7 +131,13 @@ func runGit(runtime *commandRuntime, globals *GlobalFlags, options *GitCmd) {
 			LogOpts:         options.LogOpts,
 			Include:         options.Include,
 			Jobs:            jobs.Source,
+			Engine:          options.Engine,
+			DedupLines:      options.DedupLines,
 		}
+		if gitSrc.InProcess() {
+			defer tuneGCForInProcessHistory()()
+		}
+		src = gitSrc
 	}
 
 	summary, err := detector.Scan(runtime.Context, src, findings.Add)

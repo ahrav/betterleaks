@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -252,10 +253,23 @@ func TestGitStreamMatchesLegacy(t *testing.T) {
 				return fragments
 			}
 			want := collect(&Git{Cmd: legacy, Jobs: 1})
-			got := collect(&Git{RepoPath: repo, LogOpts: opts, Jobs: 1})
+			got := collect(&Git{RepoPath: repo, LogOpts: opts, Jobs: 1, Engine: GitEngineGit})
 			require.Equal(t, want, got)
 			if opts == "" {
-				require.ElementsMatch(t, want, collect(&Git{RepoPath: repo, Jobs: 2}))
+				require.ElementsMatch(t, want, collect(&Git{RepoPath: repo, Jobs: 2, Engine: GitEngineGit}))
+				// The in-process engine yields hunks with added lines only
+				// and terminates every line with a newline; git log renders a
+				// pure rename as a header without hunks, which the patch
+				// reader yields as an empty fragment, and marks a missing
+				// final newline, which the patch reader preserves.
+				normalize := func(fragments []Fragment) []Fragment {
+					out := slices.DeleteFunc(slices.Clone(fragments), func(f Fragment) bool { return f.Raw == "" })
+					for i := range out {
+						out[i].Raw = strings.TrimSuffix(out[i].Raw, "\n")
+					}
+					return out
+				}
+				require.ElementsMatch(t, normalize(want), normalize(collect(&Git{RepoPath: repo, Jobs: 2, Engine: GitEnginePack})))
 			}
 		})
 	}

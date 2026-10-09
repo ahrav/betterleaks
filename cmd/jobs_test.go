@@ -30,6 +30,7 @@ func TestResolveJobPlan(t *testing.T) {
 	require.Equal(t, wantExplicit, resolveJobPlan(explicitJobs, objectJobProfile))
 	require.Equal(t, wantExplicit, resolveJobPlan(explicitJobs, streamJobProfile))
 	require.Equal(t, jobPlan{Source: cpus, Detector: cpus}, resolveJobPlan(explicitJobs, gitJobProfile))
+	require.Equal(t, jobPlan{Source: cpus, Detector: cpus}, resolveJobPlan(explicitJobs, inProcessGitJobProfile))
 	require.Equal(t, wantExplicit, resolveJobPlan(explicitJobs, providerJobProfile))
 
 	require.Equal(t,
@@ -42,6 +43,7 @@ func TestResolveJobPlan(t *testing.T) {
 	)
 	require.Equal(t, jobPlan{Source: cpus, Detector: cpus}, resolveJobPlan(0, streamJobProfile))
 	require.Equal(t, jobPlan{Source: min(cpus, maxAutomaticGitJobs), Detector: cpus}, resolveJobPlan(0, gitJobProfile))
+	require.Equal(t, jobPlan{Source: cpus, Detector: cpus}, resolveJobPlan(0, inProcessGitJobProfile))
 	providerJobs := min(cpus, maxAutomaticProviderJobs)
 	require.Equal(t, jobPlan{Source: providerJobs, Detector: providerJobs}, resolveJobPlan(0, providerJobProfile))
 }
@@ -52,6 +54,7 @@ func TestResolveJobPlanOneJobIsSerial(t *testing.T) {
 	require.Equal(t, want, resolveJobPlan(1, objectJobProfile))
 	require.Equal(t, want, resolveJobPlan(1, streamJobProfile))
 	require.Equal(t, want, resolveJobPlan(1, gitJobProfile))
+	require.Equal(t, want, resolveJobPlan(1, inProcessGitJobProfile))
 	require.Equal(t, want, resolveJobPlan(1, providerJobProfile))
 }
 

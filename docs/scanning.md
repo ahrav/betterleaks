@@ -232,7 +232,31 @@ betterleaks git . --include=reflogs
 
 # include commit messages from that expanded history too
 betterleaks git . --include=reflogs,commit-messages
+
+# read history through the git executable
+betterleaks git . --git-engine=git
+
+# in-process history scan reporting every occurrence of an added line
+betterleaks git . --no-git-dedup-lines
 ```
+
+A plain history scan (no `--log-opts`, no `--include`) reads the repository's
+pack files in process and needs no `git` executable. The in-process engine
+diffs every reachable commit against its first parent, skips merge commits,
+and emits the added lines of each change with the same commit attributes as
+the git engine. Compared with `git log -p -U0 --all --full-history`, it yields
+hunks for added lines only (a pure rename yields nothing), terminates every
+line with a newline, and treats a line that only gained a trailing newline as
+unchanged. `--git-engine=git` selects the git executable for every scan;
+`--git-engine=gitpack` requires the in-process engine and reports an error for
+scans it cannot serve.
+
+The in-process engine reports each added line at its first introduction in
+history, so a secret carried across branches or re-added after removal is
+reported once, at the commit that introduced it. `--no-git-dedup-lines` reports
+every occurrence instead, matching the git engine. The engine holds pack
+indexes, a commit graph, and an object cache in memory while it runs, so its
+peak memory is several times that of the git engine on large histories.
 
 `--include=commit-messages` adds message scanning to the default patch scan.
 Each selected commit's full message is scanned once, including empty commits

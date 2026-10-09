@@ -9,6 +9,10 @@ const (
 	objectJobProfile
 	streamJobProfile
 	gitJobProfile
+	// inProcessGitJobProfile serves history scans that read pack files in
+	// process: the source has no git processes to bound, so one fragment
+	// slot per processor matches the scanner's worker count.
+	inProcessGitJobProfile
 	providerJobProfile
 )
 
@@ -36,7 +40,7 @@ func resolveJobPlan(configured int, profile jobProfile) jobPlan {
 	processorJobs := max(runtime.GOMAXPROCS(0), 1)
 	if configured > 0 {
 		sourceJobs := configured
-		if profile == gitJobProfile {
+		if profile == gitJobProfile || profile == inProcessGitJobProfile {
 			sourceJobs = min(sourceJobs, processorJobs)
 		}
 		return jobPlan{
@@ -56,7 +60,7 @@ func resolveJobPlan(configured int, profile jobProfile) jobPlan {
 			Source:   processorJobs * automaticObjectJobsPerCPU,
 			Detector: processorJobs,
 		}
-	case streamJobProfile:
+	case streamJobProfile, inProcessGitJobProfile:
 		return jobPlan{Source: processorJobs, Detector: processorJobs}
 	case gitJobProfile:
 		return jobPlan{Source: min(processorJobs, maxAutomaticGitJobs), Detector: processorJobs}
